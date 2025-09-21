@@ -49,7 +49,7 @@ best_tour = results['simulated_annealing']['tour']
 solver.visualize_tour(best_tour, "Best Tour")
 ```
 
-## 📈 Performance Comparison
+##  Performance Comparison
 
 Results on a 50-city random instance:
 
@@ -59,20 +59,6 @@ Results on a 50-city random instance:
 | 2-Opt | 378.92 | 0.156 | +6.0% |
 | Simulated Annealing | 361.28 | 1.243 | +1.1% |
 | Genetic Algorithm | 359.84 | 8.671 | +0.7% |
-
-## 🔧 Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/tsp-solver.git
-cd tsp-solver
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run example
-python tsp_solver.py
-```
 
 ### Requirements
 
