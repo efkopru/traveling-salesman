@@ -3,19 +3,18 @@ Traveling Salesman Problem (TSP) Solver
 ========================================
 A comprehensive implementation of multiple TSP algorithms with visualization support.
 
-Author: Your Name
+Author: Esad Kopru
 License: MIT
 """
 
-import numpy as np
-import pandas as pd
-import random
 import math
 import time
-from typing import List, Tuple, Dict, Optional
-from itertools import permutations
+import random
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+from itertools import permutations
+from typing import List, Tuple, Dict, Optional
 
 
 class TSPSolver:
@@ -471,7 +470,7 @@ def run_example():
     """Run example demonstrating TSP solver capabilities."""
     
     # Generate problem instance
-    n_cities = 10
+    n_cities = 20
     cities = generate_random_cities(n_cities)
     city_names = [f"C{i}" for i in range(n_cities)]
     
