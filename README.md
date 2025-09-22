@@ -65,8 +65,8 @@ tour, distance = solver.genetic_algorithm()
 print(f"Best distance: {distance:.2f}")
 
 # Fast high-quality solution
-tour, distance = solver.two_opt()
 print(f"Fast distance: {distance:.2f}")
+tour, distance = solver.two_opt()
 
 # Visualize the tour
 solver.visualize_tour(tour, "Optimized Tour")
@@ -74,10 +74,10 @@ solver.visualize_tour(tour, "Optimized Tour")
 
 ## Example Output
 
-![TSP Solution Visualization](images/best tour figure 1.png)
-![TSP Solution Results](images/20 city example.png)
-
 *Example visualization and results of an optimized tour for 20 cities using the Genetic Algorithm*
+
+![TSP Solution Visualization](images/best%20tour%20figure%201.png)
+![TSP Solution Results](images/20%20city%20example.png)
 
 ## Usage Examples
 
