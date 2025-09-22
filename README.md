@@ -6,14 +6,6 @@
 
 A comprehensive Python implementation of multiple algorithms for solving the Traveling Salesman Problem (TSP), featuring optimized implementations and performance comparisons.
 
-## Features
-
-- **7 Different Algorithms**: From exact solutions to advanced metaheuristics
-- **Performance Optimized**: Fast execution even for larger instances
-- **Visualization Support**: Tour visualization with matplotlib
-- **Extensible Architecture**: Easy to add new algorithms
-- **Comprehensive Benchmarking**: Built-in algorithm comparison tools
-
 ## Algorithms
 
 | Algorithm | Type | Time Complexity | Strengths | Typical Performance |
@@ -164,16 +156,6 @@ This TSP solver can be applied to various optimization problems:
 - **DNA Sequencing**: Find optimal sequence assembly order
 - **Tourism Planning**: Create efficient sightseeing routes
 
-## Contributing
-
-Contributions are welcome! Areas for improvement:
-
-- [ ] Lin-Kernighan heuristic implementation
-- [ ] Christofides algorithm for guaranteed approximation
-- [ ] Parallel processing support
-- [ ] GPU acceleration for large instances
-- [ ] Web interface for interactive solving
-- [ ] Support for asymmetric TSP
 
 ## Performance Tips
 
@@ -198,15 +180,6 @@ The choice of algorithm depends on your specific requirements:
 - **Speed-first**: 2-Opt or Nearest Insertion  
 - **Balanced**: Simulated Annealing
 
-## Future Improvements
-
-Planned enhancements include:
-
-- Variable neighborhood search implementation
-- Ant colony optimization
-- Machine learning-guided heuristics
-- Hybrid algorithms combining multiple approaches
-- Support for time windows and capacity constraints
 
 ## References
 
@@ -222,5 +195,5 @@ MIT License - See [LICENSE](LICENSE) file for details
 
 GitHub: [@efkopru](https://github.com/efkopru)
 
----
+
 
