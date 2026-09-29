@@ -430,36 +430,37 @@ class TSPSolver:
         Returns:
             The matplotlib Figure
         """
-        fig = plt.figure(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=(10, 8))
 
-        # Plot cities
         x = self.cities[:, 0]
         y = self.cities[:, 1]
-        plt.scatter(x, y, c='red', s=200, zorder=5)
+
+        # Plot tour (closed)
+        closed = list(tour) + [tour[0]]
+        ax.plot(x[closed], y[closed], color='#2a78d6', linewidth=2,
+                solid_joinstyle='round', zorder=2)
+
+        # Plot cities
+        ax.scatter(x, y, s=60, color='#52514e', edgecolor='white',
+                   linewidth=1.5, zorder=3)
 
         # Add city labels
         for i, name in enumerate(self.city_names):
-            plt.annotate(name, (x[i], y[i]), xytext=(5, 5),
-                         textcoords='offset points', fontsize=9)
-
-        # Plot tour
-        tour_x = [x[tour[i]] for i in range(len(tour))]
-        tour_y = [y[tour[i]] for i in range(len(tour))]
-        tour_x.append(tour_x[0])  # Close the tour
-        tour_y.append(tour_y[0])
-
-        plt.plot(tour_x, tour_y, 'b-', linewidth=2, alpha=0.7)
-        plt.plot(tour_x, tour_y, 'bo', markersize=8)
+            ax.annotate(name, (x[i], y[i]), xytext=(6, 6),
+                        textcoords='offset points', fontsize=9, color='#52514e')
 
         # Add distance to title
         distance = self.calculate_tour_distance(tour)
-        plt.title(f"{title}\nTotal Distance: {distance:.2f}", fontsize=14, fontweight='bold')
-        plt.xlabel("X Coordinate")
-        plt.ylabel("Y Coordinate")
-        plt.grid(True, alpha=0.3)
+        ax.set_title(f"{title}\nTotal Distance: {distance:.2f}",
+                     fontsize=14, fontweight='bold')
+        ax.set_xlabel("X Coordinate")
+        ax.set_ylabel("Y Coordinate")
+        ax.set_aspect('equal', adjustable='datalim')
+        ax.grid(True, color='#e1e0d9', linewidth=0.8)
+        ax.set_axisbelow(True)
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
         if show:
             plt.show()
         return fig
