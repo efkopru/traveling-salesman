@@ -3,73 +3,81 @@
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Algorithms](https://img.shields.io/badge/Algorithms-7-orange.svg)](#algorithms)
+[![Tests](https://github.com/efkopru/traveling-salesman/actions/workflows/tests.yml/badge.svg)](https://github.com/efkopru/traveling-salesman/actions/workflows/tests.yml)
 
 A comprehensive Python implementation of multiple algorithms for solving the Traveling Salesman Problem (TSP), featuring optimized implementations and performance comparisons.
 
 ## Algorithms
 
-| Algorithm | Type | Time Complexity | Strengths | Typical Performance |
-|-----------|------|----------------|-----------|---------------------|
-| **Brute Force** | Exact | O(n!) | Guarantees optimal solution | Only feasible for n ≤ 10 |
-| **Nearest Neighbor** | Greedy | O(n²) | Very fast, simple | 15-20% above optimal |
-| **Nearest Insertion** | Constructive | O(n²) | Fast, often better than NN | 15-20% above optimal |
-| **2-Opt** | Local Search | O(n²) | Excellent improvement ratio | 5-10% above optimal |
-| **3-Opt** | Local Search | O(n³) | Better than 2-opt | 2-5% above optimal |
-| **Simulated Annealing** | Metaheuristic | O(n²·iterations) | Escapes local optima | 2-8% above optimal |
-| **Genetic Algorithm** | Evolutionary | O(n²·gen·pop) | Good for complex landscapes | 5-15% above optimal |
+| Algorithm | Type | Time Complexity | Strengths |
+|-----------|------|----------------|-----------|
+| **Brute Force** | Exact | O(n!) | Guarantees optimal solution; only feasible for n ≤ 10 |
+| **Nearest Neighbor** | Greedy | O(n²) | Very fast, simple |
+| **Nearest Insertion** | Constructive | O(n²) | Fast, similar quality to Nearest Neighbor |
+| **2-Opt** | Local Search | O(n²) per pass | Large improvement for very little time |
+| **3-Opt** | Local Search | O(n³) per pass | Escapes some 2-opt local optima |
+| **Simulated Annealing** | Metaheuristic | O(iterations) | Escapes local optima |
+| **Genetic Algorithm** | Evolutionary | O(n·gen·pop) | Population-based; included for comparison |
+
+All local search and annealing moves are evaluated in O(1) from the distance matrix, without recomputing the whole tour.
 
 ## Performance Results
 
-Results on a 20-city random instance:
+Random uniform instances in a 100×100 square, `generate_random_cities(n)` with the default seed and `TSPSolver(..., seed=42)`. "vs Best" is relative to the best result in each column, not to the proven optimum. Times are from a single run and vary by machine.
 
-| Algorithm | Distance | Time (s) | Performance vs Best |
-|-----------|----------|----------|---------------------|
-| **Genetic Algorithm** | 386.43 | 0.6333 | Best (baseline) |
-| Simulated Annealing | 423.29 | 0.0090 | +9.53% |
-| 2-Opt | 428.10 | 0.0000 | +10.78% |
-| Nearest Insertion | 462.66 | 0.0000 | +19.72% |
-| Nearest Neighbor | 465.04 | 0.0017 | +20.34% |
+| Algorithm | 20 cities | 50 cities | 100 cities | Time at 100 cities (s) |
+|-----------|-----------|-----------|------------|------------------------|
+| Nearest Neighbor | 465.04 (+20.3%) | 694.76 (+22.3%) | 1006.40 (+31.2%) | 0.0003 |
+| Nearest Insertion | 462.66 (+19.7%) | 699.63 (+23.2%) | 942.29 (+22.8%) | 0.0012 |
+| **2-Opt** | 386.63 (+0.05%) | **568.11** | 783.38 (+2.1%) | 0.0022 |
+| **3-Opt** | 386.63 (+0.05%) | **568.11** | **767.35** | 0.13 |
+| Simulated Annealing | **386.43** | 579.99 (+2.1%) | 777.86 (+1.4%) | 0.25 |
+| Genetic Algorithm | 451.21 (+16.8%) | 965.08 (+69.9%) | 1636.94 (+113%) | 0.75 |
 
-*Note: Genetic Algorithm achieves the best solution quality at the cost of higher computation time. For real-time applications, 2-Opt provides excellent quality with minimal computation time.*
+*Note: 2-Opt starting from Nearest Neighbor gives near-best quality in milliseconds. The Genetic Algorithm starts from random tours and uses no local search, so its quality drops quickly as the instance grows.*
 
 ### Dependencies
 
 ```
-numpy>=1.20.0
-matplotlib>=3.3.0
-pandas>=1.3.0
-scipy>=1.7.0
+pip install -r requirements.txt       # numpy, matplotlib, pandas
+pip install -r requirements-dev.txt   # adds pytest
 ```
 
 ## Quick Start
 
 ```python
+# Run from the src/ directory, or add src/ to your PYTHONPATH
 from tsp_solver import TSPSolver, generate_random_cities
 
 # Generate random cities
 cities = generate_random_cities(20)
 
-# Create solver
-solver = TSPSolver(cities)
-
-# Find best solution quality (slower)
-tour, distance = solver.genetic_algorithm()
-print(f"Best distance: {distance:.2f}")
+# Create solver (seed makes the randomized algorithms reproducible)
+solver = TSPSolver(cities, seed=42)
 
 # Fast high-quality solution
-print(f"Fast distance: {distance:.2f}")
 tour, distance = solver.two_opt()
+print(f"2-Opt distance: {distance:.2f}")
+
+# Metaheuristic
+tour, distance = solver.simulated_annealing()
+print(f"Simulated annealing distance: {distance:.2f}")
 
 # Visualize the tour
 solver.visualize_tour(tour, "Optimized Tour")
 ```
 
+To run the full example comparison:
+
+```
+python src/tsp_solver.py
+```
+
 ## Example Output
 
-*Example visualization and results of an optimized tour for 20 cities using the Genetic Algorithm*
+*Best tour for the 20-city instance (Simulated Annealing, distance 386.43)*
 
-![TSP Solution Visualization](images/best%20tour%20figure%201.png)
-![TSP Solution Results](images/20%20city%20example.png)
+![TSP Solution Visualization](images/best_tour_20.png)
 
 ## Usage Examples
 
@@ -91,13 +99,11 @@ solver = TSPSolver(cities)
 # Fast approximation
 tour_nn, dist_nn = solver.nearest_neighbor()
 
-# Better quality with 2-Opt
-tour_2opt, dist_2opt = solver.two_opt()
+# Improve an existing tour with 2-Opt or 3-Opt
+tour_2opt, dist_2opt = solver.two_opt(tour_nn)
+tour_3opt, dist_3opt = solver.three_opt(tour_2opt)
 
-# Best quality with Genetic Algorithm
-tour_ga, dist_ga = solver.genetic_algorithm()
-
-# Best quality for small instances
+# Optimal solution for small instances
 if len(cities) <= 10:
     tour_exact, dist_exact = solver.brute_force()
 ```
@@ -108,8 +114,9 @@ if len(cities) <= 10:
 # Compare all algorithms
 results = solver.compare_algorithms([
     'nearest_neighbor',
-    'nearest_insertion', 
+    'nearest_insertion',
     '2-opt',
+    '3-opt',
     'simulated_annealing',
     'genetic_algorithm'
 ])
@@ -119,31 +126,46 @@ for algo, data in results.items():
     print(f"{algo}: Distance={data['distance']:.2f}, Time={data['time']:.4f}s")
 ```
 
+Unknown algorithm names raise `ValueError`. `'brute_force'` is skipped for instances with more than 10 cities.
+
+### Saving a plot without displaying it
+
+```python
+solver.visualize_tour(tour, "Tour", save_path="tour.png", show=False)
+```
+
+## Running Tests
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
 
 ## Algorithm Selection Guide
 
 ### When to Use Each Algorithm
 
-**Nearest Neighbor**
-- Need instant results (< 0.002s)
-- Rough approximation is acceptable
-- Starting point for other algorithms
+**Nearest Neighbor / Nearest Insertion**
+- Need instant results
+- Starting tour for local search
 
 **2-Opt**
-- Need very fast results (< 0.001s)
-- Good solution quality required
+- Default choice: near-best quality in milliseconds on these instances
 - Real-time applications
 
+**3-Opt**
+- Extra quality on larger instances (100+ cities) when ~0.1 s is acceptable
+- Run it on a 2-Opt result to polish it
+
 **Simulated Annealing**
-- Balance between speed and quality
-- Medium-sized instances (20-100 cities)
-- ~0.01s computation time acceptable
+- Can escape local optima that 2-Opt gets stuck in
+- Results depend on the temperature settings and iteration budget
 
 **Genetic Algorithm**
-- Best solution quality needed
-- Can afford longer computation (0.5-2s)
-- Complex solution landscapes
-- Instances with 15-50 cities
+- Included for comparison; not competitive without local search in this implementation
+
+**Brute Force**
+- Guaranteed optimum for ≤ 10 cities
 
 
 ## Real-World Applications
@@ -159,27 +181,10 @@ This TSP solver can be applied to various optimization problems:
 
 ## Performance Tips
 
-1. **For best quality (15-30 cities)**: Use Genetic Algorithm with sufficient time budget
-2. **For balanced quality/speed (20-100 cities)**: Use Simulated Annealing
-3. **For instant results with good quality**: Use 2-Opt
-4. **For real-time applications**: Use Nearest Neighbor with optional 2-Opt improvement
-5. **For guaranteed optimal (≤10 cities)**: Use Brute Force
-
-## Algorithm Performance Analysis
-
-Based on our 20-city benchmark:
-
-- **Genetic Algorithm**: Achieves best results through population-based search and evolution
-- **Simulated Annealing**: Good balance of quality and speed through probabilistic acceptance
-- **2-Opt**: Lightning fast with respectable quality through local optimization
-- **Nearest Insertion**: Better construction heuristic than Nearest Neighbor
-- **Nearest Neighbor**: Fastest but simplest approach
-
-The choice of algorithm depends on your specific requirements:
-- **Quality-first**: Genetic Algorithm
-- **Speed-first**: 2-Opt or Nearest Insertion  
-- **Balanced**: Simulated Annealing
-
+1. **For instant results with good quality**: Use Nearest Neighbor followed by 2-Opt
+2. **For the best quality on larger instances**: Apply 3-Opt to the 2-Opt result
+3. **For reproducible results**: Pass `seed=` to `TSPSolver`
+4. **For guaranteed optimal (≤10 cities)**: Use Brute Force
 
 ## References
 
@@ -194,6 +199,3 @@ MIT License - See [LICENSE](LICENSE) file for details
 ## Author
 
 GitHub: [@efkopru](https://github.com/efkopru)
-
-
-
