@@ -23,16 +23,20 @@ All local search and annealing moves are evaluated in O(1) from the distance mat
 
 ## Performance Results
 
-Random uniform instances in a 100×100 square, `generate_random_cities(n)` with the default seed and `TSPSolver(..., seed=42)`. "vs Best" is relative to the best result in each column, not to the proven optimum. Times are from a single run and vary by machine.
+Random uniform instances in a 100×100 square, `generate_random_cities(n)` with the default seed and `TSPSolver(..., seed=42)`. Percentages are relative to the best result in each column (bold), not to the proven optimum. Times are the fastest of 3 runs and vary by machine.
 
 | Algorithm | 20 cities | 50 cities | 100 cities | Time at 100 cities (s) |
 |-----------|-----------|-----------|------------|------------------------|
 | Nearest Neighbor | 465.04 (+20.3%) | 694.76 (+22.3%) | 1006.40 (+31.2%) | 0.0003 |
-| Nearest Insertion | 462.66 (+19.7%) | 699.63 (+23.2%) | 942.29 (+22.8%) | 0.0012 |
-| **2-Opt** | 386.63 (+0.05%) | **568.11** | 783.38 (+2.1%) | 0.0022 |
-| **3-Opt** | 386.63 (+0.05%) | **568.11** | **767.35** | 0.13 |
-| Simulated Annealing | **386.43** | 579.99 (+2.1%) | 777.86 (+1.4%) | 0.25 |
-| Genetic Algorithm | 451.21 (+16.8%) | 965.08 (+69.9%) | 1636.94 (+113%) | 0.75 |
+| Nearest Insertion | 462.66 (+19.7%) | 699.63 (+23.2%) | 942.29 (+22.8%) | 0.0011 |
+| 2-Opt | 386.63 (+0.1%) | **568.11** | 783.38 (+2.1%) | 0.0020 |
+| 3-Opt | 386.63 (+0.1%) | **568.11** | **767.35** | 0.12 |
+| Simulated Annealing | **386.43** | 579.99 (+2.1%) | 777.86 (+1.4%) | 0.21 |
+| Genetic Algorithm | 451.21 (+16.8%) | 965.08 (+69.9%) | 1636.94 (+113.3%) | 0.71 |
+
+![Solution quality by instance size](images/quality_by_size.png)
+
+![Quality vs. runtime at 100 cities](images/quality_vs_time_100.png)
 
 *Note: 2-Opt starting from Nearest Neighbor gives near-best quality in milliseconds. The Genetic Algorithm starts from random tours and uses no local search, so its quality drops quickly as the instance grows.*
 
@@ -75,9 +79,56 @@ python src/tsp_solver.py
 
 ## Example Output
 
-*Best tour for the 20-city instance (Simulated Annealing, distance 386.43)*
+Running `python src/tsp_solver.py`:
 
-![TSP Solution Visualization](images/best_tour_20.png)
+```
+============================================================
+TRAVELING SALESMAN PROBLEM - 20 Cities
+============================================================
+
+Algorithm Comparison:
+------------------------------------------------------------
+Algorithm            Distance        Time (s)
+------------------------------------------------------------
+nearest_neighbor     465.04          0.0000
+nearest_insertion    462.66          0.0001
+2-opt                386.63          0.0001
+3-opt                386.63          0.0008
+simulated_annealing  386.43          0.1992
+genetic_algorithm    451.21          0.3196
+------------------------------------------------------------
+
+Best Solution: simulated_annealing
+Tour: C1 -> C19 -> C6 -> C14 -> C10 -> ...
+Total Distance: 386.43
+
+============================================================
+ADDITIONAL ANALYSIS
+============================================================
+
+Small Instance (8 cities) - Exact vs Heuristic:
+Exact Solution: 277.23
+Heuristic Solution: 277.23
+Gap: 0.00%
+```
+
+Best tour for the 20-city instance, drawn with `solver.visualize_tour`:
+
+![Best tour, 20 cities](images/best_tour_20.png)
+
+The tour each algorithm finds on the 50-city instance. Crossing edges are a visible sign of a non-optimal tour; 2-Opt removes all of them.
+
+![Tours found by each algorithm, 50 cities](images/tour_comparison_50.png)
+
+### Regenerating the figures
+
+All images and the results table above come from one script:
+
+```
+python scripts/generate_figures.py
+```
+
+Distances are deterministic; times depend on the machine.
 
 ## Usage Examples
 
@@ -132,6 +183,15 @@ Unknown algorithm names raise `ValueError`. `'brute_force'` is skipped for insta
 
 ```python
 solver.visualize_tour(tour, "Tour", save_path="tour.png", show=False)
+```
+
+## Project Structure
+
+```
+src/tsp_solver.py             Solver, benchmark helpers, example script
+tests/test_tsp_solver.py      pytest suite
+scripts/generate_figures.py   Regenerates images/ and the results table
+images/                       README figures
 ```
 
 ## Running Tests
