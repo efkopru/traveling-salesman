@@ -314,3 +314,11 @@ def test_run_tsplib_benchmark_reports_gap():
     assert (df["Gap (%)"] >= 0).all()
     nn, two = df["Distance"]
     assert two <= nn
+
+
+def test_compare_algorithms_results_do_not_depend_on_order():
+    cities = generate_random_cities(30, seed=6)
+    alone = TSPSolver(cities, seed=7).compare_algorithms(["simulated_annealing"])
+    after = TSPSolver(cities, seed=7).compare_algorithms(
+        ["iterated_local_search", "genetic_algorithm", "simulated_annealing"])
+    assert alone["simulated_annealing"]["tour"] == after["simulated_annealing"]["tour"]
