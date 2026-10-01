@@ -11,10 +11,10 @@ import math
 import time
 import random
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 from itertools import permutations
 from typing import List, Tuple, Dict, Optional
+
+from .tsplib import load_tsplib
 
 # Moves must improve the tour by more than this to count, which stops
 # local search from cycling on floating-point noise.
@@ -40,73 +40,6 @@ DISTANCE_FUNCTIONS = {
     'CEIL_2D': lambda sq: np.ceil(np.sqrt(sq)),
     'ATT': _att_distance,
 }
-
-# Published optimal tour lengths for the instances bundled in data/tsplib.
-TSPLIB_OPTIMA = {
-    'eil51': 426,
-    'berlin52': 7542,
-    'st70': 675,
-    'kroA100': 21282,
-}
-
-
-def load_tsplib(path: str) -> Dict:
-    """
-    Read a symmetric TSPLIB .tsp file with node coordinates.
-
-    Supported EDGE_WEIGHT_TYPEs: EUC_2D, CEIL_2D, ATT.
-
-    Returns:
-        Dict with 'name', 'comment', 'dimension', 'edge_weight_type',
-        'coordinates' (array of shape (n, 2)), 'city_names' (node ids as
-        strings) and 'optimum' (from TSPLIB_OPTIMA, or None).
-    """
-    header = {}
-    ids, coords = [], []
-    in_coords = False
-    with open(path) as f:
-        for raw in f:
-            line = raw.strip()
-            if not line:
-                continue
-            if line == 'EOF':
-                break
-            if in_coords:
-                parts = line.split()
-                if len(parts) < 3 or not parts[0].lstrip('-').isdigit():
-                    in_coords = False      # start of another section
-                else:
-                    ids.append(parts[0])
-                    coords.append((float(parts[1]), float(parts[2])))
-                    continue
-            if line.startswith('NODE_COORD_SECTION'):
-                in_coords = True
-            elif ':' in line:
-                key, value = line.split(':', 1)
-                header[key.strip().upper()] = value.strip()
-
-    if header.get('TYPE', 'TSP').split()[0] != 'TSP':
-        raise ValueError(f"Only symmetric TSP files are supported "
-                         f"(TYPE: {header.get('TYPE')})")
-    edge_type = header.get('EDGE_WEIGHT_TYPE', '')
-    if edge_type not in ('EUC_2D', 'CEIL_2D', 'ATT'):
-        raise ValueError(f"Unsupported EDGE_WEIGHT_TYPE '{edge_type}'; "
-                         f"supported: EUC_2D, CEIL_2D, ATT")
-    dimension = int(header.get('DIMENSION', len(coords)))
-    if len(coords) != dimension:
-        raise ValueError(f"DIMENSION is {dimension} but {len(coords)} "
-                         f"coordinates were read")
-
-    name = header.get('NAME', '')
-    return {
-        'name': name,
-        'comment': header.get('COMMENT', ''),
-        'dimension': dimension,
-        'edge_weight_type': edge_type,
-        'coordinates': np.array(coords),
-        'city_names': ids,
-        'optimum': TSPLIB_OPTIMA.get(name),
-    }
 
 
 class TSPSolver:
@@ -892,6 +825,8 @@ class TSPSolver:
         Returns:
             The matplotlib Figure
         """
+        import matplotlib.pyplot as plt  # optional dependency
+
         fig, ax = plt.subplots(figsize=(10, 8))
 
         x = self.cities[:, 0]
@@ -982,145 +917,6 @@ class TSPSolver:
         return results
 
 
-# ==================== EXAMPLE USAGE ====================
-
 def generate_random_cities(n: int, seed: int = 42) -> np.ndarray:
     """Generate random city coordinates."""
     return np.random.RandomState(seed).rand(n, 2) * 100
-
-
-def run_example(show: bool = True):
-    """Run example demonstrating TSP solver capabilities."""
-
-    # Generate problem instance
-    n_cities = 20
-    cities = generate_random_cities(n_cities)
-    city_names = [f"C{i}" for i in range(n_cities)]
-
-    # Create solver
-    solver = TSPSolver(cities, city_names, seed=42)
-
-    print("=" * 60)
-    print(f"TRAVELING SALESMAN PROBLEM - {n_cities} Cities")
-    print("=" * 60)
-
-    # Compare algorithms
-    algorithms = ['nearest_neighbor', 'nearest_insertion', '2-opt', '3-opt',
-                  'simulated_annealing', 'genetic_algorithm']
-
-    results = solver.compare_algorithms(algorithms)
-
-    # Print results
-    print("\nAlgorithm Comparison:")
-    print("-" * 60)
-    print(f"{'Algorithm':<20} {'Distance':<15} {'Time (s)':<15}")
-    print("-" * 60)
-
-    for algo, result in results.items():
-        print(f"{algo:<20} {result['distance']:<15.2f} {result['time']:<15.4f}")
-
-    # Find best solution
-    best_algo = min(results.keys(), key=lambda x: results[x]['distance'])
-    best_tour = results[best_algo]['tour']
-    best_distance = results[best_algo]['distance']
-
-    print("-" * 60)
-    print(f"\nBest Solution: {best_algo}")
-    print(f"Tour: {' -> '.join([city_names[i] for i in best_tour[:5]])} -> ...")
-    print(f"Total Distance: {best_distance:.2f}")
-
-    # Visualize best tour
-    solver.visualize_tour(best_tour, f"Best Tour ({best_algo})", show=show)
-
-    return solver, results
-
-
-# ==================== ADVANCED FEATURES ====================
-
-class TSPBenchmark:
-    """Benchmark suite for TSP algorithms."""
-
-    @staticmethod
-    def generate_benchmark_instances():
-        """Generate standard benchmark instances."""
-        instances = {
-            'random_10': generate_random_cities(10),
-            'random_20': generate_random_cities(20),
-            'random_50': generate_random_cities(50),
-            'grid_16': np.array([(i, j) for i in range(4) for j in range(4)]),
-            'circle_20': np.array([(10 * np.cos(2 * np.pi * i / 20),
-                                    10 * np.sin(2 * np.pi * i / 20))
-                                   for i in range(20)])
-        }
-        return instances
-
-    @staticmethod
-    def run_benchmark(instances: Dict[str, np.ndarray],
-                      algorithms: List[str],
-                      seed: Optional[int] = None) -> pd.DataFrame:
-        """Run benchmark on multiple instances and algorithms."""
-        results = []
-
-        for instance_name, cities in instances.items():
-            solver = TSPSolver(cities, seed=seed)
-            algo_results = solver.compare_algorithms(algorithms)
-
-            for algo, result in algo_results.items():
-                results.append({
-                    'Instance': instance_name,
-                    'Cities': len(cities),
-                    'Algorithm': algo,
-                    'Distance': result['distance'],
-                    'Time': result['time']
-                })
-
-        return pd.DataFrame(results)
-
-    @staticmethod
-    def run_tsplib_benchmark(paths: List[str], algorithms: List[str],
-                             seed: Optional[int] = None) -> pd.DataFrame:
-        """
-        Run algorithms on TSPLIB files and report the gap to the published
-        optimum (TSPLIB_OPTIMA) where known.
-        """
-        results = []
-        for path in paths:
-            instance = load_tsplib(path)
-            solver = TSPSolver(instance['coordinates'], instance['city_names'],
-                               seed=seed, distance=instance['edge_weight_type'])
-            optimum = instance['optimum']
-            for algo, result in solver.compare_algorithms(algorithms).items():
-                gap = (None if optimum is None
-                       else 100 * (result['distance'] - optimum) / optimum)
-                results.append({
-                    'Instance': instance['name'],
-                    'Cities': instance['dimension'],
-                    'Algorithm': algo,
-                    'Distance': result['distance'],
-                    'Optimum': optimum,
-                    'Gap (%)': gap,
-                    'Time': result['time'],
-                })
-        return pd.DataFrame(results)
-
-
-if __name__ == "__main__":
-    # Run example
-    solver, results = run_example()
-
-    # Additional analysis
-    print("\n" + "=" * 60)
-    print("ADDITIONAL ANALYSIS")
-    print("=" * 60)
-
-    # Test on smaller instance for exact solution
-    small_cities = generate_random_cities(8)
-    small_solver = TSPSolver(small_cities, seed=42)
-
-    print("\nSmall Instance (8 cities) - Exact vs Heuristic:")
-    exact_tour, exact_dist = small_solver.brute_force()
-    heuristic_tour, heuristic_dist = small_solver.simulated_annealing()
-
-    print(f"Exact Solution: {exact_dist:.2f}")
-    print(f"Heuristic Solution: {heuristic_dist:.2f}")
-    print(f"Gap: {(heuristic_dist - exact_dist) / exact_dist * 100:.2f}%")

@@ -1,0 +1,162 @@
+"""
+Command-line interface.
+
+    tsp-solver solve cities.csv -a 2-opt -a iterated_local_search --plot tour.png
+    tsp-solver solve data/tsplib/berlin52.tsp
+    tsp-solver solve --random 50 --seed 1
+    tsp-solver demo
+
+Also available as `python -m tsp_solver`.
+"""
+
+import argparse
+import csv
+import sys
+from typing import List, Optional, Tuple
+
+import numpy as np
+
+from .solver import TSPSolver, generate_random_cities
+from .tsplib import load_tsplib
+
+DEFAULT_ALGORITHM = 'iterated_local_search'
+
+
+def read_csv_cities(path: str) -> Tuple[np.ndarray, List[str]]:
+    """
+    Read cities from a CSV file with rows `x,y` or `x,y,name`.
+    A first row that is not numeric is treated as a header.
+    """
+    coords, names = [], []
+    with open(path, newline='') as f:
+        for row_number, row in enumerate(csv.reader(f), start=1):
+            row = [cell.strip() for cell in row]
+            if not row or not any(row):
+                continue
+            try:
+                x, y = float(row[0]), float(row[1])
+            except (ValueError, IndexError):
+                if row_number == 1:
+                    continue  # header
+                raise ValueError(f"{path}:{row_number}: expected 'x,y[,name]', "
+                                 f"got {','.join(row)!r}")
+            coords.append((x, y))
+            names.append(row[2] if len(row) > 2 and row[2] else str(len(names)))
+    if not coords:
+        raise ValueError(f"{path}: no cities found")
+    return np.array(coords), names
+
+
+def build_solver(args) -> Tuple[TSPSolver, str, Optional[float]]:
+    """Return (solver, description, known optimum or None)."""
+    if args.random is not None:
+        seed = 42 if args.seed is None else args.seed
+        cities = generate_random_cities(args.random, seed=seed)
+        solver = TSPSolver(cities, [f"C{i}" for i in range(args.random)],
+                           seed=args.seed)
+        return solver, f"{args.random} random cities (seed {seed})", None
+
+    if args.input.lower().endswith('.tsp'):
+        instance = load_tsplib(args.input)
+        solver = TSPSolver(instance['coordinates'], instance['city_names'],
+                           seed=args.seed, distance=instance['edge_weight_type'])
+        description = (f"{instance['name']} ({instance['dimension']} cities, "
+                       f"{instance['edge_weight_type']})")
+        return solver, description, instance['optimum']
+
+    cities, names = read_csv_cities(args.input)
+    solver = TSPSolver(cities, names, seed=args.seed)
+    return solver, f"{args.input} ({len(names)} cities)", None
+
+
+def cmd_solve(args, parser) -> int:
+    if (args.input is None) == (args.random is None):
+        parser.error("give either an input file or --random N")
+    try:
+        solver, description, optimum = build_solver(args)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+
+    algorithms = args.algo or [DEFAULT_ALGORITHM]
+    skipped = [a for a in algorithms
+               if solver.n_cities > solver.EXACT_LIMITS.get(a, solver.n_cities)]
+    for algo in skipped:
+        print(f"Skipping {algo}: limited to {solver.EXACT_LIMITS[algo]} cities",
+              file=sys.stderr)
+    algorithms = [a for a in algorithms if a not in skipped]
+    if not algorithms:
+        return 1
+
+    results = solver.compare_algorithms(algorithms)
+
+    print(f"Instance: {description}"
+          + (f", optimum {optimum}" if optimum is not None else ""))
+    header = f"{'Algorithm':<24}{'Distance':>14}"
+    if optimum is not None:
+        header += f"{'Gap':>10}"
+    print(header + f"{'Time (s)':>12}")
+    for algo, result in results.items():
+        line = f"{algo:<24}{result['distance']:>14.2f}"
+        if optimum is not None:
+            line += f"{100 * (result['distance'] - optimum) / optimum:>9.2f}%"
+        print(line + f"{result['time']:>12.4f}")
+
+    best_algo = min(results, key=lambda a: results[a]['distance'])
+    best = results[best_algo]
+    names = [solver.city_names[i] for i in best['tour']]
+    print(f"\nBest: {best_algo}, distance {best['distance']:.2f}")
+    print("Tour: " + " -> ".join(names + names[:1]))
+
+    if args.tour_out:
+        with open(args.tour_out, 'w') as f:
+            f.write("\n".join(names) + "\n")
+    if args.plot:
+        solver.visualize_tour(best['tour'], f"{description}: {best_algo}",
+                              save_path=args.plot, show=False)
+    return 0
+
+
+def cmd_demo(args, parser) -> int:
+    from .demo import run_demo
+    run_demo(show=args.show, save_path=args.plot)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='tsp-solver',
+        description='Solve Traveling Salesman Problem instances.')
+    commands = parser.add_subparsers(dest='command')
+    commands.required = True
+
+    solve = commands.add_parser(
+        'solve', help='solve an instance from a file or random cities',
+        description='Solve a TSP instance and print the tour.')
+    solve.add_argument('input', nargs='?',
+                       help="TSPLIB .tsp file, or CSV with rows 'x,y[,name]'")
+    solve.add_argument('--random', type=int, metavar='N',
+                       help='use N random cities instead of a file')
+    solve.add_argument('-a', '--algo', action='append',
+                       choices=list(TSPSolver.ALGORITHMS), metavar='ALGO',
+                       help=f"algorithm to run; repeat to compare "
+                            f"(default: {DEFAULT_ALGORITHM}). Choices: "
+                            f"{', '.join(TSPSolver.ALGORITHMS)}")
+    solve.add_argument('--seed', type=int,
+                       help='seed for randomized algorithms and --random')
+    solve.add_argument('--plot', metavar='PNG',
+                       help='save a plot of the best tour (needs matplotlib)')
+    solve.add_argument('--tour-out', metavar='FILE',
+                       help='write the best tour, one city name per line')
+    solve.set_defaults(handler=cmd_solve)
+
+    demo = commands.add_parser('demo', help='run the 20-city example comparison')
+    demo.add_argument('--show', action='store_true', help='display the best tour')
+    demo.add_argument('--plot', metavar='PNG', help='save a plot of the best tour')
+    demo.set_defaults(handler=cmd_demo)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.handler(args, parser)

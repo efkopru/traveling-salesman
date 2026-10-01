@@ -1,7 +1,7 @@
 """
 Regenerate the README figures and results table.
 
-Usage (from the repository root):
+Usage (from the repository root, after `pip install -e ".[dev]"`):
     python scripts/generate_figures.py
 
 Writes PNGs to images/ and prints the README results table as Markdown.
@@ -10,7 +10,6 @@ on the machine.
 """
 
 import os
-import sys
 
 import matplotlib
 import matplotlib.ticker
@@ -18,10 +17,9 @@ import matplotlib.ticker
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "src"))
-
 from tsp_solver import TSPSolver, generate_random_cities  # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 IMAGES = os.path.join(ROOT, "images")
 SIZES = (20, 50, 100)
