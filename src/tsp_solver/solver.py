@@ -8,10 +8,11 @@ License: MIT
 """
 
 import math
+import os
 import time
 import random
 import numpy as np
-from itertools import permutations
+from itertools import chain, permutations
 from typing import List, Tuple, Dict, Optional, Union
 
 from .tsplib import load_tsplib
@@ -101,7 +102,7 @@ class TSPSolver:
         return DISTANCE_FUNCTIONS[self.distance]((diff ** 2).sum(axis=-1))
 
     @classmethod
-    def from_tsplib(cls, source: Union[str, Dict],
+    def from_tsplib(cls, source: Union[str, os.PathLike, Dict],
                     seed: Optional[int] = None) -> 'TSPSolver':
         """
         Create a solver from a TSPLIB instance, using its distance
@@ -112,7 +113,7 @@ class TSPSolver:
                 load_tsplib() (to keep its metadata, e.g. 'optimum')
             seed: Seed for the randomized algorithms
         """
-        instance = load_tsplib(source) if isinstance(source, str) else source
+        instance = source if isinstance(source, dict) else load_tsplib(source)
         return cls(instance['coordinates'], instance['city_names'], seed=seed,
                    distance=instance['edge_weight_type'])
 
@@ -289,26 +290,52 @@ class TSPSolver:
 
     # ==================== LOCAL SEARCH ====================
 
-    def _neighbor_lists(self, k: Optional[int] = None) -> List[List[int]]:
-        """For each city, the other cities sorted by distance (k nearest, or
-        all when k is None). The distance sort is done once; lists are
-        cached per k."""
+    def _neighbor_lists(self, k: Optional[int] = None):
+        """
+        For each city, the other cities in order of increasing distance
+        (ties by index), cached per k.
+
+        k given: lists of the k nearest cities, found with a partial sort.
+        k None: all cities, as a `_SortedNeighbors` whose rows are iterated
+        lazily, so scans that stop early never pay for a full n x n sort.
+        """
         if k is not None and k < 1:
             raise ValueError(f"neighbors must be a positive integer or None (got {k})")
         cache = self.__dict__.setdefault('_neighbor_cache', {})
-        k = None if k is None or k >= self.n_cities - 1 else k
+        if k is not None:
+            k = min(k, self.n_cities - 1)
         if k not in cache:
-            if 'order' not in cache:
-                cache['order'] = np.argsort(self.distance_matrix, axis=1,
-                                            kind='stable')
-            order = cache['order']
-            width = order.shape[1] if k is None else k + 1
-            # The city itself is normally first (distance 0) but may not be
-            # when cities coincide, so drop it explicitly.
-            lists = [[int(c) for c in row[:width] if c != i]
-                     for i, row in enumerate(order)]
-            cache[k] = lists if k is None else [row[:k] for row in lists]
+            if k is None:
+                cache[k] = _SortedNeighbors(self, prefix=16)
+            else:
+                cache[k] = self._nearest(k)
         return cache[k]
+
+    def _nearest(self, k: int) -> List[List[int]]:
+        """The k nearest other cities of every city, in the same order as a
+        stable argsort of the distance row (self excluded)."""
+        D = self.distance_matrix
+        n = self.n_cities
+        if k <= 0:
+            return [[] for _ in range(n)]
+        width = min(k + 1, n)                 # + 1 for the city itself
+        kth = np.partition(D, width - 1, axis=1)[:, width - 1]
+        lists = []
+        for i in range(n):
+            row = D[i]
+            candidates = np.nonzero(row <= kth[i])[0]
+            candidates = candidates[np.lexsort((candidates, row[candidates]))]
+            lists.append([int(c) for c in candidates if c != i][:k])
+        return lists
+
+    def _validate_tour(self, tour: List[int]) -> List[int]:
+        """Return `tour` as a new list of distinct city indices, or raise."""
+        tour = [int(c) for c in tour]
+        if len(set(tour)) != len(tour):
+            raise ValueError("tour contains repeated cities")
+        if any(c < 0 or c >= self.n_cities for c in tour):
+            raise ValueError(f"tour contains a city index outside 0..{self.n_cities - 1}")
+        return tour
 
     @staticmethod
     def _rotate_to(tour: List[int], start: int) -> None:
@@ -317,9 +344,10 @@ class TSPSolver:
         if idx:
             tour[:] = tour[idx:] + tour[:idx]
 
-    def _two_opt_dlb(self, tour: List[int], neighbors: List[List[int]],
+    def _two_opt_dlb(self, tour: List[int], neighbors,
                      queue: Optional[List[int]] = None,
-                     max_passes: Optional[int] = None) -> int:
+                     max_passes: Optional[int] = None,
+                     until_optimal: bool = False) -> int:
         """
         In-place 2-opt with neighbor lists and don't-look bits.
 
@@ -328,12 +356,17 @@ class TSPSolver:
         each tour direction, candidate partners c are scanned in order of
         distance and the scan stops once D[a][c] >= D[a][next(a)], because
         an improving move must add an edge shorter than one it removes.
-        With full neighbor lists the result is therefore 2-optimal.
+
+        Don't-look bits alone can miss a move that appears at a city whose
+        own edges did not change. With `until_optimal`, every city is
+        re-examined after the queue empties, until a full sweep finds no
+        move; with full neighbor lists the result is then 2-optimal.
 
         Passes: the initially queued cities form pass 1; a city re-queued
         while processing a pass-p city belongs to pass p + 1. With
         `max_passes`, cities beyond that pass are not examined (0 = no
-        change). The tour keeps its first city.
+        change). The tour may be a subset of the cities. It keeps its
+        first city.
 
         Returns the number of improving moves applied.
         """
@@ -342,9 +375,12 @@ class TSPSolver:
             return 0
         start = tour[0]
         D = self._dist
-        pos = [0] * n
+        size = self.n_cities
+        pos = [0] * size
+        in_tour = [False] * size
         for idx, city in enumerate(tour):
             pos[city] = idx
+            in_tour[city] = True
 
         def reverse(i, j):
             """Reverse tour positions i..j (cyclic, inclusive), choosing the
@@ -360,16 +396,25 @@ class TSPSolver:
                 i = (i + 1) % n
                 j = (j - 1) % n
 
+        full_sweep = queue is None
         if queue is None:
             queue = list(tour)
-        in_queue = [False] * n
+        in_queue = [False] * size
         for city in queue:
             in_queue[city] = True
         queue = list(queue)
-        pass_of = [1] * n
+        pass_of = [1] * size
         moves = 0
+        sweep_moves = 0
 
-        while queue:
+        while True:
+            if not queue:
+                if not until_optimal or (full_sweep and sweep_moves == 0):
+                    break
+                queue = list(tour)
+                for city in queue:
+                    in_queue[city] = True
+                full_sweep, sweep_moves = True, 0
             a = queue.pop()
             in_queue[a] = False
             current_pass = pass_of[a]
@@ -384,6 +429,8 @@ class TSPSolver:
                     d_ac = D[a][c]
                     if d_ac >= d_ab:
                         break
+                    if not in_tour[c]:
+                        continue
                     pc = pos[c]
                     d = tour[(pc + direction) % n]
                     if c == b or d == a:
@@ -395,6 +442,7 @@ class TSPSolver:
                         else:
                             reverse(pa, pos[d])      # b a ... d c -> b d ... a c
                         moves += 1
+                        sweep_moves += 1
                         improved = True
                         for x in (a, b, c, d):
                             if not in_queue[x]:
@@ -425,9 +473,10 @@ class TSPSolver:
                 runs until no improving move remains; 0 returns the tour
                 unchanged.
             neighbors: Only consider the k nearest cities as new edge
-                partners. None (default) considers all cities, which
-                guarantees a true 2-opt local optimum; k = 8-10 is much
-                faster on large instances at a small cost in quality.
+                partners. None (default) considers all cities; with
+                max_iterations=None the result is then a true 2-opt local
+                optimum. k = 8-10 is faster on large instances at a small
+                cost in quality.
 
         Time Complexity: O(n²) per pass in the worst case, typically far
         less thanks to the early stop on sorted neighbor lists. The
@@ -436,13 +485,14 @@ class TSPSolver:
         if initial_tour is None:
             tour, _ = self.nearest_neighbor()
         else:
-            tour = list(initial_tour)
+            tour = self._validate_tour(initial_tour)
 
         self._two_opt_dlb(tour, self._neighbor_lists(neighbors),
-                          max_passes=max_iterations)
+                          max_passes=max_iterations,
+                          until_optimal=max_iterations is None)
         return tour, self.calculate_tour_distance(tour)
 
-    def _or_opt_pass(self, tour: List[int], neighbors: List[List[int]],
+    def _or_opt_pass(self, tour: List[int], neighbors,
                      max_segment: int = 3) -> int:
         """
         In-place Or-opt: move segments of 1..max_segment consecutive cities
@@ -470,11 +520,11 @@ class TSPSolver:
                         continue
 
                     best = None
-                    for x in (s, e):
+                    for x in ((s,) if s == e else (s, e)):
                         for c in neighbors[x]:
-                            if (pos[c] - i) % n < seg_len:
-                                continue  # c is inside the segment
-                            pc = pos[c]
+                            pc = pos.get(c)
+                            if pc is None or (pc - i) % n < seg_len:
+                                continue  # c is not in the tour, or inside the segment
                             for u, v in ((c, tour[(pc + 1) % n]),
                                          (tour[(pc - 1) % n], c)):
                                 if (pos[u] - i) % n < seg_len or \
@@ -520,7 +570,7 @@ class TSPSolver:
         if initial_tour is None:
             tour, _ = self.nearest_neighbor()
         else:
-            tour = list(initial_tour)
+            tour = self._validate_tour(initial_tour)
         self._or_opt_pass(tour, self._neighbor_lists(neighbors), max_segment)
         return tour, self.calculate_tour_distance(tour)
 
@@ -529,9 +579,9 @@ class TSPSolver:
         """In-place 2-opt and Or-opt, alternated until neither improves."""
         full = self._neighbor_lists(neighbors)
         near = self._neighbor_lists(or_opt_neighbors)
-        self._two_opt_dlb(tour, full)
+        self._two_opt_dlb(tour, full, until_optimal=True)
         while self._or_opt_pass(tour, near):
-            self._two_opt_dlb(tour, full)
+            self._two_opt_dlb(tour, full, until_optimal=True)
 
     def local_search(self, initial_tour: Optional[List[int]] = None,
                      neighbors: Optional[int] = None) -> Tuple[List[int], float]:
@@ -545,7 +595,7 @@ class TSPSolver:
         if initial_tour is None:
             tour, _ = self.nearest_neighbor()
         else:
-            tour = list(initial_tour)
+            tour = self._validate_tour(initial_tour)
         self._local_search(tour, neighbors)
         return tour, self.calculate_tour_distance(tour)
 
@@ -555,8 +605,10 @@ class TSPSolver:
         n = len(tour)
         a, b, c = sorted(self.rng.sample(range(1, n), 3))
         new = tour[:a] + tour[b:c] + tour[a:b] + tour[c:]
+        # 1 <= a < b < c <= n - 1, so the closing edge (tour[-1], tour[0])
+        # is never cut.
         touched = [tour[a - 1], tour[a], tour[b - 1], tour[b],
-                   tour[c - 1], tour[c % n], tour[0], tour[-1]]
+                   tour[c - 1], tour[c]]
         return new, touched
 
     def iterated_local_search(self, initial_tour: Optional[List[int]] = None,
@@ -576,7 +628,7 @@ class TSPSolver:
         if initial_tour is None:
             best, _ = self.nearest_neighbor()
         else:
-            best = list(initial_tour)
+            best = self._validate_tour(initial_tour)
         n = len(best)
         self._local_search(best, neighbors)
         if n < 8:
@@ -607,7 +659,7 @@ class TSPSolver:
         if initial_tour is None:
             tour, _ = self.nearest_neighbor()
         else:
-            tour = list(initial_tour)
+            tour = self._validate_tour(initial_tour)
 
         n = len(tour)
         D = self._dist
@@ -754,8 +806,16 @@ class TSPSolver:
             auto_start, auto_end = self._annealing_temperatures(propose)
             initial_temp = auto_start if initial_temp is None else initial_temp
             min_temp = auto_end if min_temp is None else min_temp
+        if max_iterations < 1:
+            raise ValueError(f"max_iterations must be at least 1 (got {max_iterations})")
+        if not 0 < min_temp < initial_temp:
+            raise ValueError(f"need 0 < min_temp < initial_temp, got min_temp={min_temp:g}, "
+                             f"initial_temp={initial_temp:g} (a value left as None is "
+                             f"derived from the instance's move sizes)")
         if cooling_rate is None:
             cooling_rate = (min_temp / initial_temp) ** (1 / max_iterations)
+        elif not 0 < cooling_rate < 1:
+            raise ValueError(f"cooling_rate must be between 0 and 1 (got {cooling_rate:g})")
 
         best_tour = current_tour.copy()
         best_distance = current_distance
@@ -953,6 +1013,11 @@ class TSPSolver:
     # Exact algorithms are skipped by compare_algorithms above these sizes.
     EXACT_LIMITS = {'brute_force': 10, 'held_karp': 20}
 
+    def exceeds_size_limit(self, algorithm: str) -> bool:
+        """True if `algorithm` is an exact method and this instance has more
+        cities than it supports (EXACT_LIMITS)."""
+        return self.n_cities > self.EXACT_LIMITS.get(algorithm, self.n_cities)
+
     def compare_algorithms(self, algorithms: Optional[List[str]] = None) -> Dict:
         """
         Compare performance of different algorithms.
@@ -976,7 +1041,7 @@ class TSPSolver:
         results = {}
 
         for algo in algorithms:
-            if self.n_cities > self.EXACT_LIMITS.get(algo, self.n_cities):
+            if self.exceeds_size_limit(algo):
                 continue
 
             if self.seed is not None:
@@ -999,3 +1064,55 @@ class TSPSolver:
 def generate_random_cities(n: int, seed: int = 42) -> np.ndarray:
     """Generate random city coordinates."""
     return np.random.RandomState(seed).rand(n, 2) * 100
+
+
+class _SortedNeighbors:
+    """
+    Every other city ordered by distance from each city (ties by index),
+    for the early-stopping neighbor scans.
+
+    The `prefix` nearest cities are precomputed for all rows; the rest of a
+    row is sorted only when a scan gets that far, which is rare because
+    scans stop at the first partner farther than the current tour edge.
+    """
+
+    def __init__(self, solver: 'TSPSolver', prefix: int = 16):
+        n = solver.n_cities
+        self._prefix = solver._nearest(min(prefix, n - 1))
+        if prefix >= n - 1:
+            self._tails = None                    # rows are already complete
+        else:
+            self._tails = [_LazyTail(solver.distance_matrix, city, self._prefix[city])
+                           for city in range(n)]
+
+    def __len__(self) -> int:
+        return len(self._prefix)
+
+    def __iter__(self):
+        return (self[city] for city in range(len(self)))
+
+    def __getitem__(self, city: int):
+        if not 0 <= city < len(self._prefix):
+            raise IndexError(city)
+        if self._tails is None:
+            return self._prefix[city]
+        # chain() only asks the tail for its items once the prefix is used up.
+        return chain(self._prefix[city], self._tails[city])
+
+
+class _LazyTail:
+    """The part of one city's sorted neighbor row after its prefix,
+    sorted on first iteration."""
+
+    __slots__ = ('_D', '_city', '_prefix', '_items')
+
+    def __init__(self, D: np.ndarray, city: int, prefix: List[int]):
+        self._D, self._city, self._prefix, self._items = D, city, prefix, None
+
+    def __iter__(self):
+        if self._items is None:
+            skip = set(self._prefix)
+            skip.add(self._city)
+            order = np.argsort(self._D[self._city], kind='stable')
+            self._items = [int(c) for c in order if c not in skip]
+        return iter(self._items)

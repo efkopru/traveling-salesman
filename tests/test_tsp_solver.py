@@ -1,4 +1,6 @@
 import os
+import pathlib
+import random
 
 import numpy as np
 import pytest
@@ -93,6 +95,7 @@ def test_neighbor_lists_are_sorted_and_exclude_self():
     solver = TSPSolver(generate_random_cities(12, seed=4))
     D = solver.distance_matrix
     for city, row in enumerate(solver._neighbor_lists()):
+        row = list(row)
         assert city not in row and len(row) == 11
         assert all(D[city, a] <= D[city, b] for a, b in zip(row, row[1:]))
     assert all(len(row) == 3 for row in solver._neighbor_lists(3))
@@ -135,13 +138,20 @@ def test_invalid_neighbor_count_is_rejected(k):
         solver.simulated_annealing(neighbors=k)
 
 
-def test_neighbor_lists_share_one_sort():
-    solver = TSPSolver(generate_random_cities(30, seed=3))
-    full = solver._neighbor_lists()
-    near = solver._neighbor_lists(5)
-    assert all(row[:5] == short for row, short in zip(full, near))
-    assert solver._neighbor_lists(5) is near          # cached
-    assert "order" in solver._neighbor_cache          # one argsort reused
+@pytest.mark.parametrize("cities", [
+    generate_random_cities(40, seed=3),
+    # duplicated and grid points create many distance ties
+    np.vstack([generate_random_cities(15, seed=4)] * 2),
+    np.array([(i, j) for i in range(6) for j in range(6)]),
+])
+def test_neighbor_order_matches_stable_sort(cities):
+    solver = TSPSolver(cities)
+    expected = [[int(c) for c in np.argsort(row, kind="stable") if c != i]
+                for i, row in enumerate(solver.distance_matrix)]
+    assert [list(row) for row in solver._neighbor_lists()] == expected  # lazy tail
+    for k in (1, 5, 20):
+        assert solver._neighbor_lists(k) == [row[:k] for row in expected]
+    assert solver._neighbor_lists(5) is solver._neighbor_lists(5)  # cached
 
 
 @pytest.mark.parametrize("cities", [[], [1, 2, 3], [[1, 2, 3]], np.zeros((0, 2))])
@@ -393,3 +403,92 @@ def test_simulated_annealing_move_strategies(neighbors):
                                                 neighbors=neighbors)
     assert_valid(solver, tour, distance)
     assert distance <= start_distance + 1e-9
+
+
+
+def improving_two_opt_move_exists(solver, tour):
+    D = solver.distance_matrix
+    n = len(tour)
+    for i in range(n):
+        for j in range(i + 2, n):
+            if i == 0 and j == n - 1:
+                continue
+            a, b, c, d = tour[i], tour[i + 1], tour[j], tour[(j + 1) % n]
+            if D[a, c] + D[b, d] < D[a, b] + D[c, d] - 1e-9:
+                return True
+    return False
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_two_opt_reaches_local_optimum_from_random_starts(seed):
+    # Don't-look bits alone left an improving move in ~5% of such runs.
+    solver = TSPSolver(generate_random_cities(80, seed=seed))
+    start = list(range(80))
+    random.Random(seed).shuffle(start)
+    tour, distance = solver.two_opt(start)
+    assert not improving_two_opt_move_exists(solver, tour)
+    assert solver.two_opt(tour)[1] == pytest.approx(distance)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"max_iterations": 0},
+    {"min_temp": 0},
+    {"initial_temp": 1.0, "min_temp": 2.0},
+    {"cooling_rate": 1.5},
+])
+def test_simulated_annealing_rejects_invalid_parameters(kwargs):
+    solver = TSPSolver(generate_random_cities(20, seed=1), seed=1)
+    with pytest.raises(ValueError):
+        solver.simulated_annealing(**kwargs)
+
+
+def test_simulated_annealing_rejects_min_temp_above_derived_start():
+    # min_temp=1 was the old default; on a 0-1 scale instance it is hotter
+    # than the derived start temperature and used to skip annealing silently.
+    solver = TSPSolver(generate_random_cities(50, seed=1) / 100, seed=1)
+    with pytest.raises(ValueError, match="min_temp"):
+        solver.simulated_annealing(min_temp=1)
+
+
+def test_from_tsplib_accepts_pathlib_path():
+    path = pathlib.Path(TSPLIB_DIR) / "eil51.tsp"
+    assert TSPSolver.from_tsplib(path).n_cities == 51
+
+
+@pytest.mark.parametrize("method", ["two_opt", "or_opt", "local_search",
+                                    "three_opt", "iterated_local_search"])
+def test_local_search_on_partial_tour(method):
+    solver = TSPSolver(generate_random_cities(30, seed=9), seed=0)
+    subset = [3, 17, 8, 25, 1, 12, 29, 6, 20, 14]
+    start_distance = solver.calculate_tour_distance(subset)
+    tour, distance = getattr(solver, method)(subset)
+    assert sorted(tour) == sorted(subset)
+    assert distance <= start_distance + 1e-9
+
+
+@pytest.mark.parametrize("tour", [[0, 1, 1, 2], [0, 1, 2, 99], [-1, 0, 1, 2]])
+def test_invalid_initial_tours_are_rejected(tour):
+    solver = TSPSolver(generate_random_cities(10, seed=1))
+    with pytest.raises(ValueError):
+        solver.two_opt(tour)
+
+
+def test_double_bridge_reports_exactly_the_changed_endpoints():
+    solver = TSPSolver(generate_random_cities(30, seed=2), seed=5)
+    tour = list(range(30))
+
+    def edges(t):
+        return {frozenset((t[i], t[(i + 1) % len(t)])) for i in range(len(t))}
+
+    for _ in range(50):
+        new, touched = solver._double_bridge(tour)
+        changed = edges(tour) ^ edges(new)
+        assert set(touched) == {city for edge in changed for city in edge}
+
+
+def test_exceeds_size_limit():
+    small = TSPSolver(generate_random_cities(10))
+    large = TSPSolver(generate_random_cities(21))
+    assert not small.exceeds_size_limit("brute_force")
+    assert large.exceeds_size_limit("held_karp")
+    assert not large.exceeds_size_limit("2-opt")

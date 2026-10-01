@@ -83,3 +83,35 @@ def test_plot_without_matplotlib_is_a_usage_error(argv, monkeypatch, capsys, tmp
     assert excinfo.value.code == 2
     assert "tsp-solver[plot]" in capsys.readouterr().err
     assert not (tmp_path / "x.png").exists()
+
+
+def test_csv_with_byte_order_mark_keeps_first_city(tmp_path):
+    path = tmp_path / "excel.csv"
+    path.write_bytes("1,2\n3,4\n5,6\n".encode("utf-8-sig"))
+    cities, names = read_csv_cities(str(path))
+    assert cities.tolist() == [[1, 2], [3, 4], [5, 6]]
+
+
+def test_random_instance_without_seed_is_reproducible(capsys):
+    def run():
+        main(["solve", "--random", "60"])
+        out = capsys.readouterr().out
+        return [line for line in out.splitlines() if line.startswith(("Best:", "Tour:"))]
+
+    first = run()
+    assert first == run()
+
+
+@pytest.mark.parametrize("option", ["--tour-out", "--plot"])
+def test_unwritable_output_fails_before_solving(option, tmp_path, capsys):
+    target = str(tmp_path / "missing_dir" / "out.txt")
+    with pytest.raises(SystemExit) as excinfo:
+        main(["solve", "--random", "8", option, target])
+    assert excinfo.value.code == 2
+    assert "Instance:" not in capsys.readouterr().out
+
+
+def test_output_write_error_is_reported(tmp_path, capsys):
+    # A directory passes the up-front check but cannot be opened as a file.
+    assert main(["solve", "--random", "8", "--tour-out", str(tmp_path)]) == 1
+    assert "could not write output" in capsys.readouterr().err
