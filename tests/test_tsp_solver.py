@@ -206,3 +206,40 @@ def test_simulated_annealing_without_polish_is_valid():
     solver = TSPSolver(generate_random_cities(25, seed=3), seed=3)
     tour, distance = solver.simulated_annealing(max_iterations=5000, polish=False)
     assert_valid(solver, tour, distance)
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 9])
+@pytest.mark.parametrize("seed", range(3))
+def test_held_karp_matches_brute_force(n, seed):
+    solver = TSPSolver(generate_random_cities(n, seed=seed))
+    tour, distance = solver.held_karp()
+    assert_valid(solver, tour, distance)
+    assert distance == pytest.approx(solver.brute_force()[1])
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_heuristics_never_beat_held_karp(seed):
+    solver = TSPSolver(generate_random_cities(14, seed=seed), seed=seed)
+    _, optimal = solver.held_karp()
+    for method in HEURISTICS:
+        _, distance = run(solver, method)
+        assert distance >= optimal - 1e-9
+
+
+def test_iterated_local_search_finds_optimum_on_small_instance():
+    solver = TSPSolver(generate_random_cities(14, seed=11), seed=0)
+    _, optimal = solver.held_karp()
+    _, distance = solver.iterated_local_search(iterations=300)
+    assert distance == pytest.approx(optimal)
+
+
+def test_held_karp_rejects_large_instances():
+    with pytest.raises(ValueError):
+        TSPSolver(generate_random_cities(21)).held_karp()
+    with pytest.raises(ValueError):
+        TSPSolver(generate_random_cities(13)).held_karp(max_cities=12)
+
+
+def test_compare_algorithms_skips_held_karp_above_limit():
+    solver = TSPSolver(generate_random_cities(21))
+    assert "held_karp" not in solver.compare_algorithms(["held_karp"])

@@ -27,6 +27,7 @@ class TSPSolver:
 
     Algorithms included:
     - Brute Force (exact solution for small instances)
+    - Held-Karp dynamic programming (exact, up to ~20 cities)
     - Nearest Neighbor (greedy heuristic)
     - Nearest Insertion (constructive heuristic)
     - 2-Opt (local search improvement)
@@ -85,6 +86,9 @@ class TSPSolver:
         best_tour = [start_city]
 
         for perm in permutations(other_cities):
+            # A tour and its reverse have the same length; check one of them.
+            if len(perm) > 1 and perm[0] > perm[-1]:
+                continue
             tour = [start_city] + list(perm)
             distance = self.calculate_tour_distance(tour)
             if distance < min_distance:
@@ -92,6 +96,68 @@ class TSPSolver:
                 best_tour = tour
 
         return best_tour, self.calculate_tour_distance(best_tour)
+
+    def held_karp(self, max_cities: int = 20) -> Tuple[List[int], float]:
+        """
+        Exact solution by Held-Karp dynamic programming.
+
+        dp[S][j] is the shortest path that starts at city 0, visits exactly
+        the cities in subset S, and ends at j. Subsets are processed in
+        order of size, vectorized with NumPy.
+
+        Time Complexity: O(n² · 2ⁿ); memory O(n · 2ⁿ) (about 90 MB at
+        n = 20).
+
+        Args:
+            max_cities: Refuse larger instances (memory grows as 2ⁿ)
+        """
+        n = self.n_cities
+        if n > max_cities:
+            raise ValueError(f"Held-Karp limited to <= {max_cities} cities "
+                             f"(got {n}); memory grows as n * 2^n")
+        if n <= 3:
+            tour = list(range(n))
+            return tour, self.calculate_tour_distance(tour)
+
+        D = self.distance_matrix
+        m = n - 1                      # cities 1..n-1 map to bits 0..m-1
+        size = 1 << m
+        to_city = D[1:, 1:]            # to_city[k, j] = D[k+1][j+1]
+
+        dp = np.full((size, m), np.inf)
+        parent = np.full((size, m), -1, dtype=np.int8)
+        for j in range(m):
+            dp[1 << j, j] = D[0, j + 1]
+
+        masks = np.arange(size)
+        popcount = np.zeros(size, dtype=np.int8)
+        for bit in range(m):
+            popcount += ((masks >> bit) & 1).astype(np.int8)
+
+        for subset_size in range(2, m + 1):
+            layer = masks[popcount == subset_size]
+            for j in range(m):
+                with_j = layer[(layer >> j) & 1 == 1]
+                previous = with_j ^ (1 << j)
+                candidates = dp[previous] + to_city[:, j]
+                best_k = np.argmin(candidates, axis=1)
+                dp[with_j, j] = candidates[np.arange(len(with_j)), best_k]
+                parent[with_j, j] = best_k
+
+        full = size - 1
+        j = int(np.argmin(dp[full] + D[1:, 0]))
+        mask = full
+        reversed_path = []
+        while True:
+            reversed_path.append(j + 1)
+            k = int(parent[mask, j])
+            mask ^= 1 << j
+            if k < 0:
+                break
+            j = k
+
+        tour = [0] + reversed_path[::-1]
+        return tour, self.calculate_tour_distance(tour)
 
     # ==================== GREEDY HEURISTICS ====================
 
@@ -756,6 +822,7 @@ class TSPSolver:
 
     ALGORITHMS = {
         'brute_force': 'brute_force',
+        'held_karp': 'held_karp',
         'nearest_neighbor': 'nearest_neighbor',
         'nearest_insertion': 'nearest_insertion',
         '2-opt': 'two_opt',
@@ -766,14 +833,17 @@ class TSPSolver:
         'genetic_algorithm': 'genetic_algorithm',
     }
 
+    # Exact algorithms are skipped by compare_algorithms above these sizes.
+    EXACT_LIMITS = {'brute_force': 10, 'held_karp': 20}
+
     def compare_algorithms(self, algorithms: Optional[List[str]] = None) -> Dict:
         """
         Compare performance of different algorithms.
 
         Args:
             algorithms: List of algorithm names to compare (keys of
-                TSPSolver.ALGORITHMS). 'brute_force' is skipped when the
-                instance has more than 10 cities.
+                TSPSolver.ALGORITHMS). Exact algorithms are skipped above
+                their size limit (EXACT_LIMITS: brute force 10, Held-Karp 20).
 
         Returns:
             Dictionary with results for each algorithm
@@ -789,7 +859,7 @@ class TSPSolver:
         results = {}
 
         for algo in algorithms:
-            if algo == 'brute_force' and self.n_cities > 10:
+            if self.n_cities > self.EXACT_LIMITS.get(algo, self.n_cities):
                 continue
 
             start_time = time.perf_counter()
