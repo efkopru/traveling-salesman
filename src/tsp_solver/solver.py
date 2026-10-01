@@ -12,7 +12,7 @@ import time
 import random
 import numpy as np
 from itertools import permutations
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Union
 
 from .tsplib import load_tsplib
 
@@ -80,7 +80,13 @@ class TSPSolver:
                              f"Choose from {list(DISTANCE_FUNCTIONS)}")
         self.distance = distance
         self.cities = np.asarray(cities, dtype=float)
+        if self.cities.ndim != 2 or self.cities.shape[1] != 2 or len(self.cities) == 0:
+            raise ValueError(f"cities must be a non-empty array of shape (n, 2), "
+                             f"got shape {self.cities.shape}")
         self.n_cities = len(self.cities)
+        if city_names is not None and len(city_names) != self.n_cities:
+            raise ValueError(f"{len(city_names)} city names for "
+                             f"{self.n_cities} cities")
         self.city_names = city_names or [f"City_{i}" for i in range(self.n_cities)]
         self.seed = seed
         self.rng = random.Random(seed)
@@ -91,16 +97,22 @@ class TSPSolver:
 
     def _calculate_distance_matrix(self) -> np.ndarray:
         """Calculate the distance matrix between all cities."""
-        if self.n_cities == 0:
-            return np.zeros((0, 0))
         diff = self.cities[:, np.newaxis, :] - self.cities[np.newaxis, :, :]
         return DISTANCE_FUNCTIONS[self.distance]((diff ** 2).sum(axis=-1))
 
     @classmethod
-    def from_tsplib(cls, path: str, seed: Optional[int] = None) -> 'TSPSolver':
-        """Create a solver from a TSPLIB .tsp file, using the file's
-        distance convention (EDGE_WEIGHT_TYPE)."""
-        instance = load_tsplib(path)
+    def from_tsplib(cls, source: Union[str, Dict],
+                    seed: Optional[int] = None) -> 'TSPSolver':
+        """
+        Create a solver from a TSPLIB instance, using its distance
+        convention (EDGE_WEIGHT_TYPE).
+
+        Args:
+            source: Path to a .tsp file, or an instance already read with
+                load_tsplib() (to keep its metadata, e.g. 'optimum')
+            seed: Seed for the randomized algorithms
+        """
+        instance = load_tsplib(source) if isinstance(source, str) else source
         return cls(instance['coordinates'], instance['city_names'], seed=seed,
                    distance=instance['edge_weight_type'])
 
@@ -279,21 +291,35 @@ class TSPSolver:
 
     def _neighbor_lists(self, k: Optional[int] = None) -> List[List[int]]:
         """For each city, the other cities sorted by distance (k nearest, or
-        all when k is None). Cached per k."""
+        all when k is None). The distance sort is done once; lists are
+        cached per k."""
+        if k is not None and k < 1:
+            raise ValueError(f"neighbors must be a positive integer or None (got {k})")
         cache = self.__dict__.setdefault('_neighbor_cache', {})
         k = None if k is None or k >= self.n_cities - 1 else k
         if k not in cache:
-            order = np.argsort(self.distance_matrix, axis=1, kind='stable')
-            # Column 0 is the city itself (distance 0) unless there are ties
-            # at zero distance, so drop the city explicitly.
-            lists = [[int(c) for c in row if c != i]
+            if 'order' not in cache:
+                cache['order'] = np.argsort(self.distance_matrix, axis=1,
+                                            kind='stable')
+            order = cache['order']
+            width = order.shape[1] if k is None else k + 1
+            # The city itself is normally first (distance 0) but may not be
+            # when cities coincide, so drop it explicitly.
+            lists = [[int(c) for c in row[:width] if c != i]
                      for i, row in enumerate(order)]
             cache[k] = lists if k is None else [row[:k] for row in lists]
         return cache[k]
 
+    @staticmethod
+    def _rotate_to(tour: List[int], start: int) -> None:
+        """Rotate `tour` in place so that it begins with `start`."""
+        idx = tour.index(start)
+        if idx:
+            tour[:] = tour[idx:] + tour[:idx]
+
     def _two_opt_dlb(self, tour: List[int], neighbors: List[List[int]],
                      queue: Optional[List[int]] = None,
-                     max_moves: Optional[int] = None) -> int:
+                     max_passes: Optional[int] = None) -> int:
         """
         In-place 2-opt with neighbor lists and don't-look bits.
 
@@ -304,11 +330,17 @@ class TSPSolver:
         an improving move must add an edge shorter than one it removes.
         With full neighbor lists the result is therefore 2-optimal.
 
+        Passes: the initially queued cities form pass 1; a city re-queued
+        while processing a pass-p city belongs to pass p + 1. With
+        `max_passes`, cities beyond that pass are not examined (0 = no
+        change). The tour keeps its first city.
+
         Returns the number of improving moves applied.
         """
         n = len(tour)
-        if n < 4:
+        if n < 4 or max_passes == 0:
             return 0
+        start = tour[0]
         D = self._dist
         pos = [0] * n
         for idx, city in enumerate(tour):
@@ -334,11 +366,15 @@ class TSPSolver:
         for city in queue:
             in_queue[city] = True
         queue = list(queue)
+        pass_of = [1] * n
         moves = 0
 
         while queue:
             a = queue.pop()
             in_queue[a] = False
+            current_pass = pass_of[a]
+            if max_passes is not None and current_pass > max_passes:
+                continue
             improved = False
             for direction in (1, -1):
                 pa = pos[a]
@@ -363,12 +399,13 @@ class TSPSolver:
                         for x in (a, b, c, d):
                             if not in_queue[x]:
                                 in_queue[x] = True
+                                pass_of[x] = current_pass + 1
                                 queue.append(x)
                         break
                 if improved:
                     break
-            if max_moves is not None and moves >= max_moves:
-                break
+
+        self._rotate_to(tour, start)
         return moves
 
     def two_opt(self, initial_tour: Optional[List[int]] = None,
@@ -382,15 +419,19 @@ class TSPSolver:
 
         Args:
             initial_tour: Starting tour (default: Nearest Neighbor)
-            max_iterations: Maximum number of improving moves (None = until
-                no improving move remains)
+            max_iterations: Maximum number of improvement passes. Pass 1
+                examines every city; each later pass examines the cities
+                whose edges changed in the previous pass. None (default)
+                runs until no improving move remains; 0 returns the tour
+                unchanged.
             neighbors: Only consider the k nearest cities as new edge
                 partners. None (default) considers all cities, which
                 guarantees a true 2-opt local optimum; k = 8-10 is much
                 faster on large instances at a small cost in quality.
 
         Time Complexity: O(n²) per pass in the worst case, typically far
-        less thanks to the early stop on sorted neighbor lists.
+        less thanks to the early stop on sorted neighbor lists. The
+        returned tour starts with the same city as the input tour.
         """
         if initial_tour is None:
             tour, _ = self.nearest_neighbor()
@@ -398,7 +439,7 @@ class TSPSolver:
             tour = list(initial_tour)
 
         self._two_opt_dlb(tour, self._neighbor_lists(neighbors),
-                          max_moves=max_iterations)
+                          max_passes=max_iterations)
         return tour, self.calculate_tour_distance(tour)
 
     def _or_opt_pass(self, tour: List[int], neighbors: List[List[int]],
@@ -409,7 +450,10 @@ class TSPSolver:
         Repeats full passes until no move improves. Returns moves applied.
         """
         n = len(tour)
+        if n == 0:
+            return 0
         D = self._dist
+        start = tour[0]
         total = 0
         improved = True
         while improved:
@@ -457,6 +501,7 @@ class TSPSolver:
                     pos = {city: idx for idx, city in enumerate(tour)}
                     total += 1
                     improved = True
+        self._rotate_to(tour, start)
         return total
 
     def or_opt(self, initial_tour: Optional[List[int]] = None,
@@ -620,24 +665,23 @@ class TSPSolver:
         c, d = tour[j - 1], tour[j % n]
         return i, j, D[a][c] + D[b][d] - D[a][b] - D[c][d]
 
-    def _annealing_temperatures(self, tour: List[int],
-                                samples: int = 500) -> Tuple[float, float]:
+    @staticmethod
+    def _annealing_temperatures(propose, samples: int = 500) -> Tuple[float, float]:
         """
-        Choose start/end temperatures for this instance from a sample of
-        random 2-opt moves on `tour`:
+        Choose start/end temperatures from a sample of the moves the search
+        will actually propose (`propose()` returns (i, j, delta) or None):
 
-        - start: a 10th-percentile worsening move is accepted with
-          probability 0.2
-        - end: a 1st-percentile worsening move is accepted with
+        - start: the median worsening move is accepted with probability 0.3
+        - end: a 5th-percentile worsening move is accepted with
           probability 0.01
 
-        Percentiles rather than the mean are used because random moves on
-        a decent tour are mostly very bad; the moves that matter late in
-        the search are the smallest ones.
+        Calibrating on the proposal distribution keeps the schedule matched
+        to the move type: nearest-neighbor moves are far smaller than moves
+        between random cities. Temperatures scale with the coordinates.
         """
         worsening = []
         for _ in range(samples):
-            move = self._random_two_opt_move(tour)
+            move = propose()
             if move is not None and move[2] > EPSILON:
                 worsening.append(move[2])
         if not worsening:
@@ -647,8 +691,8 @@ class TSPSolver:
         def quantile(q):
             return worsening[min(len(worsening) - 1, int(q * len(worsening)))]
 
-        return (-quantile(0.10) / math.log(0.2),
-                -quantile(0.01) / math.log(0.01))
+        return (-quantile(0.50) / math.log(0.3),
+                -quantile(0.05) / math.log(0.01))
 
     def simulated_annealing(self, initial_temp: Optional[float] = None,
                             cooling_rate: Optional[float] = None,
@@ -664,8 +708,8 @@ class TSPSolver:
         far fewer iterations than moves between random cities.
 
         Args:
-            initial_temp: Starting temperature. If None, derived from the
-                instance (see _annealing_temperatures).
+            initial_temp: Starting temperature. If None, derived from a
+                sample of the proposed moves (see _annealing_temperatures).
             cooling_rate: Geometric cooling factor per iteration. If None, it
                 is chosen so the temperature reaches min_temp exactly at
                 max_iterations, so the full iteration budget is used.
@@ -682,20 +726,7 @@ class TSPSolver:
         if n < 4:
             return current_tour, current_distance
 
-        if initial_temp is None or min_temp is None:
-            auto_start, auto_end = self._annealing_temperatures(current_tour)
-            initial_temp = auto_start if initial_temp is None else initial_temp
-            min_temp = auto_end if min_temp is None else min_temp
-        if cooling_rate is None:
-            cooling_rate = (min_temp / initial_temp) ** (1 / max_iterations)
-
         rng = self.rng
-        best_tour = current_tour.copy()
-        best_distance = current_distance
-
-        temp = initial_temp
-        iteration = 0
-
         if neighbors is None:
             def propose():
                 return self._random_two_opt_move(current_tour)
@@ -718,6 +749,18 @@ class TSPSolver:
                 A, B = current_tour[i], current_tour[i + 1]
                 C, Dn = current_tour[j], current_tour[(j + 1) % n]
                 return i + 1, j + 1, D[A][C] + D[B][Dn] - D[A][B] - D[C][Dn]
+
+        if initial_temp is None or min_temp is None:
+            auto_start, auto_end = self._annealing_temperatures(propose)
+            initial_temp = auto_start if initial_temp is None else initial_temp
+            min_temp = auto_end if min_temp is None else min_temp
+        if cooling_rate is None:
+            cooling_rate = (min_temp / initial_temp) ** (1 / max_iterations)
+
+        best_tour = current_tour.copy()
+        best_distance = current_distance
+        temp = initial_temp
+        iteration = 0
 
         while temp > min_temp and iteration < max_iterations:
             temp *= cooling_rate

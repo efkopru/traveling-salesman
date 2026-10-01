@@ -105,12 +105,54 @@ def test_iterated_local_search_is_reproducible():
     assert first == second
 
 
-def test_two_opt_max_iterations_limits_moves():
+def test_two_opt_max_iterations_counts_passes():
     solver = TSPSolver(generate_random_cities(50, seed=2))
     start, start_distance = solver.nearest_neighbor()
-    _, one_move = solver.two_opt(start, max_iterations=1)
+    zero_tour, zero = solver.two_opt(start, max_iterations=0)
+    _, one_pass = solver.two_opt(start, max_iterations=1)
     _, full = solver.two_opt(start)
-    assert full <= one_move < start_distance
+    assert zero_tour == start and zero == pytest.approx(start_distance)
+    assert full <= one_pass < start_distance
+    assert full == pytest.approx(solver.two_opt(start, max_iterations=1000)[1])
+
+
+@pytest.mark.parametrize("method", ["two_opt", "or_opt", "local_search",
+                                    "iterated_local_search"])
+def test_local_search_keeps_first_city(method):
+    solver = TSPSolver(generate_random_cities(40, seed=12), seed=0)
+    start, _ = solver.nearest_neighbor(start_city=7)
+    kwargs = {"iterations": 50} if method == "iterated_local_search" else {}
+    tour, _ = getattr(solver, method)(start, **kwargs)
+    assert tour[0] == 7
+
+
+@pytest.mark.parametrize("k", [0, -3])
+def test_invalid_neighbor_count_is_rejected(k):
+    solver = TSPSolver(generate_random_cities(10, seed=1), seed=1)
+    with pytest.raises(ValueError):
+        solver.two_opt(neighbors=k)
+    with pytest.raises(ValueError):
+        solver.simulated_annealing(neighbors=k)
+
+
+def test_neighbor_lists_share_one_sort():
+    solver = TSPSolver(generate_random_cities(30, seed=3))
+    full = solver._neighbor_lists()
+    near = solver._neighbor_lists(5)
+    assert all(row[:5] == short for row, short in zip(full, near))
+    assert solver._neighbor_lists(5) is near          # cached
+    assert "order" in solver._neighbor_cache          # one argsort reused
+
+
+@pytest.mark.parametrize("cities", [[], [1, 2, 3], [[1, 2, 3]], np.zeros((0, 2))])
+def test_invalid_cities_are_rejected(cities):
+    with pytest.raises(ValueError):
+        TSPSolver(cities)
+
+
+def test_city_names_must_match_cities():
+    with pytest.raises(ValueError):
+        TSPSolver(generate_random_cities(3), city_names=["a", "b"])
 
 
 def test_two_opt_does_not_mutate_input():
@@ -198,11 +240,22 @@ def test_annealing_temperatures_scale_with_coordinates():
     cities = generate_random_cities(30, seed=5)
     small = TSPSolver(cities, seed=1)
     large = TSPSolver(cities * 1000, seed=1)
-    t_small = small._annealing_temperatures(small.nearest_neighbor()[0])
-    t_large = large._annealing_temperatures(large.nearest_neighbor()[0])
+    tour = small.nearest_neighbor()[0]
+    t_small = small._annealing_temperatures(lambda: small._random_two_opt_move(tour))
+    t_large = large._annealing_temperatures(lambda: large._random_two_opt_move(tour))
     assert t_small[0] > t_small[1] > 0
     assert t_large[0] == pytest.approx(1000 * t_small[0])
     assert t_large[1] == pytest.approx(1000 * t_small[1])
+
+
+def test_annealing_temperatures_follow_the_proposal_distribution():
+    # Larger proposed moves must give hotter temperatures.
+    moves = iter([(0, 2, d) for d in range(1, 501)] * 2)
+    low = TSPSolver._annealing_temperatures(lambda: next(moves))
+    big = iter([(0, 2, 10.0 * d) for d in range(1, 501)])
+    high = TSPSolver._annealing_temperatures(lambda: next(big))
+    assert high[0] == pytest.approx(10 * low[0])
+    assert high[1] == pytest.approx(10 * low[1])
 
 
 def test_simulated_annealing_without_polish_is_valid():
@@ -304,6 +357,14 @@ def test_tsplib_rejects_unsupported_files(tmp_path):
         load_tsplib(write_tsp(tmp_path, "EUC_2D", [(0, 0), (1, 1)], dimension=3))
     with pytest.raises(ValueError):
         TSPSolver([(0, 0), (1, 1)], distance="manhattan")
+
+
+def test_from_tsplib_accepts_loaded_instance():
+    instance = load_tsplib(os.path.join(TSPLIB_DIR, "eil51.tsp"))
+    from_dict = TSPSolver.from_tsplib(instance)
+    from_path = TSPSolver.from_tsplib(os.path.join(TSPLIB_DIR, "eil51.tsp"))
+    assert np.array_equal(from_dict.distance_matrix, from_path.distance_matrix)
+    assert from_dict.city_names == instance["city_names"]
 
 
 def test_run_tsplib_benchmark_reports_gap():

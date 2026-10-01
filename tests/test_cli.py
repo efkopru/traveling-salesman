@@ -1,4 +1,5 @@
 import os
+import sys
 
 import pytest
 
@@ -45,7 +46,9 @@ def test_exact_algorithm_above_limit_is_skipped(capsys):
 
 
 @pytest.mark.parametrize("argv", [["solve"], ["solve", "x.csv", "--random", "5"],
-                                  ["solve", "--random", "5", "-a", "nope"]])
+                                  ["solve", "--random", "5", "-a", "nope"],
+                                  ["solve", "--random", "0"],
+                                  ["solve", "--random", "-4"]])
 def test_invalid_arguments_exit_with_error(argv):
     with pytest.raises(SystemExit) as excinfo:
         main(argv)
@@ -68,3 +71,15 @@ def test_demo_runs(capsys):
     assert main(["demo"]) == 0
     out = capsys.readouterr().out
     assert "held_karp" in out and "Exact Solution" in out
+
+
+@pytest.mark.parametrize("argv", [["solve", "--random", "8", "--plot", "x.png"],
+                                  ["demo", "--plot", "x.png"], ["demo", "--show"]])
+def test_plot_without_matplotlib_is_a_usage_error(argv, monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "matplotlib", None)
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv)
+    assert excinfo.value.code == 2
+    assert "tsp-solver[plot]" in capsys.readouterr().err
+    assert not (tmp_path / "x.png").exists()

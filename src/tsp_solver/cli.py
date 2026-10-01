@@ -20,6 +20,22 @@ from .solver import TSPSolver, generate_random_cities
 from .tsplib import load_tsplib
 
 DEFAULT_ALGORITHM = 'iterated_local_search'
+PLOT_HINT = "plotting needs matplotlib: pip install 'tsp-solver[plot]'"
+
+
+def positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
+def require_matplotlib(parser) -> None:
+    """Fail before solving if a plot is requested without matplotlib."""
+    try:
+        import matplotlib  # noqa: F401
+    except ImportError:
+        parser.error(PLOT_HINT)
 
 
 def read_csv_cities(path: str) -> Tuple[np.ndarray, List[str]]:
@@ -58,8 +74,7 @@ def build_solver(args) -> Tuple[TSPSolver, str, Optional[float]]:
 
     if args.input.lower().endswith('.tsp'):
         instance = load_tsplib(args.input)
-        solver = TSPSolver(instance['coordinates'], instance['city_names'],
-                           seed=args.seed, distance=instance['edge_weight_type'])
+        solver = TSPSolver.from_tsplib(instance, seed=args.seed)
         description = (f"{instance['name']} ({instance['dimension']} cities, "
                        f"{instance['edge_weight_type']})")
         return solver, description, instance['optimum']
@@ -72,6 +87,8 @@ def build_solver(args) -> Tuple[TSPSolver, str, Optional[float]]:
 def cmd_solve(args, parser) -> int:
     if (args.input is None) == (args.random is None):
         parser.error("give either an input file or --random N")
+    if args.plot:
+        require_matplotlib(parser)
     try:
         solver, description, optimum = build_solver(args)
     except (OSError, ValueError) as error:
@@ -117,6 +134,8 @@ def cmd_solve(args, parser) -> int:
 
 
 def cmd_demo(args, parser) -> int:
+    if args.plot or args.show:
+        require_matplotlib(parser)
     from .demo import run_demo
     run_demo(show=args.show, save_path=args.plot)
     return 0
@@ -134,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
         description='Solve a TSP instance and print the tour.')
     solve.add_argument('input', nargs='?',
                        help="TSPLIB .tsp file, or CSV with rows 'x,y[,name]'")
-    solve.add_argument('--random', type=int, metavar='N',
+    solve.add_argument('--random', type=positive_int, metavar='N',
                        help='use N random cities instead of a file')
     solve.add_argument('-a', '--algo', action='append',
                        choices=list(TSPSolver.ALGORITHMS), metavar='ALGO',
