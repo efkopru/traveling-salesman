@@ -501,22 +501,68 @@ class TSPSolver:
 
     # ==================== METAHEURISTICS ====================
 
-    def simulated_annealing(self, initial_temp: float = 1000,
+    def _random_two_opt_move(self, tour: List[int]):
+        """Pick a random 2-opt move reversing tour[i:j]; return (i, j, delta)
+        or None for a degenerate pick."""
+        n = len(tour)
+        D = self._dist
+        i, j = sorted(self.rng.sample(range(n + 1), 2))
+        if j - i < 2 or (i == 0 and j == n):
+            return None
+        a, b = tour[i - 1], tour[i]
+        c, d = tour[j - 1], tour[j % n]
+        return i, j, D[a][c] + D[b][d] - D[a][b] - D[c][d]
+
+    def _annealing_temperatures(self, tour: List[int],
+                                samples: int = 500) -> Tuple[float, float]:
+        """
+        Choose start/end temperatures for this instance from a sample of
+        random 2-opt moves on `tour`:
+
+        - start: a 10th-percentile worsening move is accepted with
+          probability 0.2
+        - end: a 1st-percentile worsening move is accepted with
+          probability 0.01
+
+        Percentiles rather than the mean are used because random moves on
+        a decent tour are mostly very bad; the moves that matter late in
+        the search are the smallest ones.
+        """
+        worsening = []
+        for _ in range(samples):
+            move = self._random_two_opt_move(tour)
+            if move is not None and move[2] > EPSILON:
+                worsening.append(move[2])
+        if not worsening:
+            return 1.0, 1e-3
+        worsening.sort()
+
+        def quantile(q):
+            return worsening[min(len(worsening) - 1, int(q * len(worsening)))]
+
+        return (-quantile(0.10) / math.log(0.2),
+                -quantile(0.01) / math.log(0.01))
+
+    def simulated_annealing(self, initial_temp: Optional[float] = None,
                             cooling_rate: Optional[float] = None,
-                            min_temp: float = 1,
-                            max_iterations: int = 100000) -> Tuple[List[int], float]:
+                            min_temp: Optional[float] = None,
+                            max_iterations: int = 100000,
+                            polish: bool = True) -> Tuple[List[int], float]:
         """
         Simulated annealing metaheuristic.
 
         Uses random 2-opt moves evaluated in O(1).
 
         Args:
-            initial_temp: Starting temperature
+            initial_temp: Starting temperature. If None, derived from the
+                instance (see _annealing_temperatures).
             cooling_rate: Geometric cooling factor per iteration. If None, it
                 is chosen so the temperature reaches min_temp exactly at
                 max_iterations, so the full iteration budget is used.
-            min_temp: Temperature at which the search stops
+            min_temp: Temperature at which the search stops. If None,
+                derived from the instance.
             max_iterations: Maximum number of moves attempted
+            polish: Finish with 2-opt + Or-opt on the best tour found
         """
         n = self.n_cities
         # Start with nearest neighbor solution
@@ -524,10 +570,13 @@ class TSPSolver:
         if n < 4:
             return current_tour, current_distance
 
+        if initial_temp is None or min_temp is None:
+            auto_start, auto_end = self._annealing_temperatures(current_tour)
+            initial_temp = auto_start if initial_temp is None else initial_temp
+            min_temp = auto_end if min_temp is None else min_temp
         if cooling_rate is None:
             cooling_rate = (min_temp / initial_temp) ** (1 / max_iterations)
 
-        D = self._dist
         rng = self.rng
         best_tour = current_tour.copy()
         best_distance = current_distance
@@ -539,14 +588,10 @@ class TSPSolver:
             temp *= cooling_rate
             iteration += 1
 
-            # Random 2-opt move: reverse current_tour[i:j]
-            i, j = sorted(rng.sample(range(n + 1), 2))
-            if j - i < 2 or (i == 0 and j == n):
+            move = self._random_two_opt_move(current_tour)
+            if move is None:
                 continue
-
-            a, b = current_tour[i - 1], current_tour[i]
-            c, d = current_tour[j - 1], current_tour[j % n]
-            delta = D[a][c] + D[b][d] - D[a][b] - D[c][d]
+            i, j, delta = move
 
             # Accept or reject move
             if delta < 0 or rng.random() < math.exp(-delta / temp):
@@ -557,6 +602,8 @@ class TSPSolver:
                     best_tour = current_tour.copy()
                     best_distance = current_distance
 
+        if polish:
+            self._local_search(best_tour)
         return best_tour, self.calculate_tour_distance(best_tour)
 
     def genetic_algorithm(self, population_size: int = 30,

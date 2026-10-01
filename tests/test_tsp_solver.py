@@ -189,3 +189,20 @@ def test_run_benchmark():
     distance = dict(zip(df["Algorithm"], df["Distance"]))
     # A 4x4 unit grid has an optimal tour of length 16.
     assert 16 - 1e-9 <= distance["2-opt"] <= distance["nearest_neighbor"]
+
+
+def test_annealing_temperatures_scale_with_coordinates():
+    cities = generate_random_cities(30, seed=5)
+    small = TSPSolver(cities, seed=1)
+    large = TSPSolver(cities * 1000, seed=1)
+    t_small = small._annealing_temperatures(small.nearest_neighbor()[0])
+    t_large = large._annealing_temperatures(large.nearest_neighbor()[0])
+    assert t_small[0] > t_small[1] > 0
+    assert t_large[0] == pytest.approx(1000 * t_small[0])
+    assert t_large[1] == pytest.approx(1000 * t_small[1])
+
+
+def test_simulated_annealing_without_polish_is_valid():
+    solver = TSPSolver(generate_random_cities(25, seed=3), seed=3)
+    tour, distance = solver.simulated_annealing(max_iterations=5000, polish=False)
+    assert_valid(solver, tour, distance)
