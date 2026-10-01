@@ -4,6 +4,7 @@ import pytest
 from tsp_solver import TSPSolver, TSPBenchmark, generate_random_cities
 
 HEURISTICS = ["nearest_neighbor", "nearest_insertion", "two_opt", "three_opt",
+              "or_opt", "local_search", "iterated_local_search",
               "simulated_annealing", "genetic_algorithm"]
 
 
@@ -12,6 +13,8 @@ def run(solver, method):
         return solver.genetic_algorithm(generations=50)
     if method == "simulated_annealing":
         return solver.simulated_annealing(max_iterations=5000)
+    if method == "iterated_local_search":
+        return solver.iterated_local_search(iterations=50)
     return getattr(solver, method)()
 
 
@@ -59,6 +62,52 @@ def test_local_search_does_not_worsen_start(seed):
     _, three = solver.three_opt(start)
     assert two <= start_distance + 1e-9
     assert three <= start_distance + 1e-9
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_or_opt_and_combined_search_do_not_worsen(seed):
+    solver = TSPSolver(generate_random_cities(40, seed=seed), seed=seed)
+    start, start_distance = solver.nearest_neighbor()
+    _, or_distance = solver.or_opt(start)
+    _, two = solver.two_opt(start)
+    _, combined = solver.local_search(start)
+    _, ils = solver.iterated_local_search(start, iterations=100)
+    assert or_distance <= start_distance + 1e-9
+    assert combined <= two + 1e-9
+    assert ils <= combined + 1e-9
+
+
+@pytest.mark.parametrize("k", [3, 8])
+def test_two_opt_with_neighbor_lists(k):
+    solver = TSPSolver(generate_random_cities(60, seed=1))
+    start, start_distance = solver.nearest_neighbor()
+    tour, distance = solver.two_opt(start, neighbors=k)
+    assert_valid(solver, tour, distance)
+    assert distance <= start_distance + 1e-9
+
+
+def test_neighbor_lists_are_sorted_and_exclude_self():
+    solver = TSPSolver(generate_random_cities(12, seed=4))
+    D = solver.distance_matrix
+    for city, row in enumerate(solver._neighbor_lists()):
+        assert city not in row and len(row) == 11
+        assert all(D[city, a] <= D[city, b] for a, b in zip(row, row[1:]))
+    assert all(len(row) == 3 for row in solver._neighbor_lists(3))
+
+
+def test_iterated_local_search_is_reproducible():
+    cities = generate_random_cities(30)
+    first = TSPSolver(cities, seed=9).iterated_local_search(iterations=100)
+    second = TSPSolver(cities, seed=9).iterated_local_search(iterations=100)
+    assert first == second
+
+
+def test_two_opt_max_iterations_limits_moves():
+    solver = TSPSolver(generate_random_cities(50, seed=2))
+    start, start_distance = solver.nearest_neighbor()
+    _, one_move = solver.two_opt(start, max_iterations=1)
+    _, full = solver.two_opt(start)
+    assert full <= one_move < start_distance
 
 
 def test_two_opt_does_not_mutate_input():

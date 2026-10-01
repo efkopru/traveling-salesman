@@ -31,6 +31,8 @@ class TSPSolver:
     - Nearest Insertion (constructive heuristic)
     - 2-Opt (local search improvement)
     - 3-Opt (local search improvement)
+    - Or-Opt and 2-Opt + Or-Opt (local search improvement)
+    - Iterated Local Search (2-opt with double-bridge kicks)
     - Simulated Annealing (metaheuristic)
     - Genetic Algorithm (evolutionary approach)
     """
@@ -168,43 +170,277 @@ class TSPSolver:
 
     # ==================== LOCAL SEARCH ====================
 
+    def _neighbor_lists(self, k: Optional[int] = None) -> List[List[int]]:
+        """For each city, the other cities sorted by distance (k nearest, or
+        all when k is None). Cached per k."""
+        cache = self.__dict__.setdefault('_neighbor_cache', {})
+        k = None if k is None or k >= self.n_cities - 1 else k
+        if k not in cache:
+            order = np.argsort(self.distance_matrix, axis=1, kind='stable')
+            # Column 0 is the city itself (distance 0) unless there are ties
+            # at zero distance, so drop the city explicitly.
+            lists = [[int(c) for c in row if c != i]
+                     for i, row in enumerate(order)]
+            cache[k] = lists if k is None else [row[:k] for row in lists]
+        return cache[k]
+
+    def _two_opt_dlb(self, tour: List[int], neighbors: List[List[int]],
+                     queue: Optional[List[int]] = None,
+                     max_moves: Optional[int] = None) -> int:
+        """
+        In-place 2-opt with neighbor lists and don't-look bits.
+
+        Only cities in `queue` (all cities if None) are examined at first;
+        endpoints of every applied move are re-queued. For each city a and
+        each tour direction, candidate partners c are scanned in order of
+        distance and the scan stops once D[a][c] >= D[a][next(a)], because
+        an improving move must add an edge shorter than one it removes.
+        With full neighbor lists the result is therefore 2-optimal.
+
+        Returns the number of improving moves applied.
+        """
+        n = len(tour)
+        if n < 4:
+            return 0
+        D = self._dist
+        pos = [0] * n
+        for idx, city in enumerate(tour):
+            pos[city] = idx
+
+        def reverse(i, j):
+            """Reverse tour positions i..j (cyclic, inclusive), choosing the
+            shorter side so each move costs at most n/2 swaps."""
+            length = (j - i) % n + 1
+            if 2 * length > n:
+                i, j = (j + 1) % n, (i - 1) % n
+                length = n - length
+            for _ in range(length // 2):
+                ci, cj = tour[i], tour[j]
+                tour[i], tour[j] = cj, ci
+                pos[cj], pos[ci] = i, j
+                i = (i + 1) % n
+                j = (j - 1) % n
+
+        if queue is None:
+            queue = list(tour)
+        in_queue = [False] * n
+        for city in queue:
+            in_queue[city] = True
+        queue = list(queue)
+        moves = 0
+
+        while queue:
+            a = queue.pop()
+            in_queue[a] = False
+            improved = False
+            for direction in (1, -1):
+                pa = pos[a]
+                b = tour[(pa + direction) % n]
+                d_ab = D[a][b]
+                for c in neighbors[a]:
+                    d_ac = D[a][c]
+                    if d_ac >= d_ab:
+                        break
+                    pc = pos[c]
+                    d = tour[(pc + direction) % n]
+                    if c == b or d == a:
+                        continue
+                    delta = d_ac + D[b][d] - d_ab - D[c][d]
+                    if delta < -EPSILON:
+                        if direction == 1:
+                            reverse(pos[b], pc)      # a b ... c d -> a c ... b d
+                        else:
+                            reverse(pa, pos[d])      # b a ... d c -> b d ... a c
+                        moves += 1
+                        improved = True
+                        for x in (a, b, c, d):
+                            if not in_queue[x]:
+                                in_queue[x] = True
+                                queue.append(x)
+                        break
+                if improved:
+                    break
+            if max_moves is not None and moves >= max_moves:
+                break
+        return moves
+
     def two_opt(self, initial_tour: Optional[List[int]] = None,
-                max_iterations: int = 1000) -> Tuple[List[int], float]:
+                max_iterations: Optional[int] = None,
+                neighbors: Optional[int] = None) -> Tuple[List[int], float]:
         """
         2-opt local search improvement.
 
-        Considers every pair of non-adjacent edges, including the edge that
-        closes the tour, and evaluates each move in O(1).
+        Uses distance-sorted neighbor lists and don't-look bits, and
+        evaluates each move in O(1).
 
-        Time Complexity: O(n² * iterations)
+        Args:
+            initial_tour: Starting tour (default: Nearest Neighbor)
+            max_iterations: Maximum number of improving moves (None = until
+                no improving move remains)
+            neighbors: Only consider the k nearest cities as new edge
+                partners. None (default) considers all cities, which
+                guarantees a true 2-opt local optimum; k = 8-10 is much
+                faster on large instances at a small cost in quality.
+
+        Time Complexity: O(n²) per pass in the worst case, typically far
+        less thanks to the early stop on sorted neighbor lists.
         """
         if initial_tour is None:
             tour, _ = self.nearest_neighbor()
         else:
             tour = list(initial_tour)
 
+        self._two_opt_dlb(tour, self._neighbor_lists(neighbors),
+                          max_moves=max_iterations)
+        return tour, self.calculate_tour_distance(tour)
+
+    def _or_opt_pass(self, tour: List[int], neighbors: List[List[int]],
+                     max_segment: int = 3) -> int:
+        """
+        In-place Or-opt: move segments of 1..max_segment consecutive cities
+        (optionally reversed) next to one of their endpoints' neighbors.
+        Repeats full passes until no move improves. Returns moves applied.
+        """
         n = len(tour)
         D = self._dist
-        improved = n >= 4
-        iterations = 0
-
-        while improved and iterations < max_iterations:
+        total = 0
+        improved = True
+        while improved:
             improved = False
-            for i in range(n - 1):
-                # When i == 0, j == n - 1 would pick the edge adjacent to
-                # (tour[0], tour[1]) through the wrap-around, so skip it.
-                for j in range(i + 2, n if i > 0 else n - 1):
-                    a, b = tour[i], tour[i + 1]
-                    c, d = tour[j], tour[(j + 1) % n]
-                    # Replace edges (a,b) and (c,d) with (a,c) and (b,d)
-                    delta = D[a][c] + D[b][d] - D[a][b] - D[c][d]
-                    if delta < -EPSILON:
-                        tour[i + 1:j + 1] = reversed(tour[i + 1:j + 1])
-                        improved = True
+            for seg_len in range(1, max_segment + 1):
+                if n < seg_len + 3:
+                    break
+                pos = {city: idx for idx, city in enumerate(tour)}
+                for i in range(n):
+                    s, e = tour[i], tour[(i + seg_len - 1) % n]
+                    p, nx = tour[(i - 1) % n], tour[(i + seg_len) % n]
+                    gain_remove = D[p][s] + D[e][nx] - D[p][nx]
+                    if gain_remove <= EPSILON:
+                        continue
 
-            iterations += 1
+                    best = None
+                    for x in (s, e):
+                        for c in neighbors[x]:
+                            if (pos[c] - i) % n < seg_len:
+                                continue  # c is inside the segment
+                            pc = pos[c]
+                            for u, v in ((c, tour[(pc + 1) % n]),
+                                         (tour[(pc - 1) % n], c)):
+                                if (pos[u] - i) % n < seg_len or \
+                                        (pos[v] - i) % n < seg_len:
+                                    continue
+                                base = D[u][v]
+                                forward = D[u][s] + D[e][v] - base
+                                backward = D[u][e] + D[s][v] - base
+                                cost, rev = min((forward, False), (backward, True))
+                                gain = gain_remove - cost
+                                if gain > EPSILON and (best is None or gain > best[0]):
+                                    best = (gain, u, rev)
+                    if best is None:
+                        continue
 
+                    _, u, rev = best
+                    segment = [tour[(i + t) % n] for t in range(seg_len)]
+                    if rev:
+                        segment.reverse()
+                    seg_set = set(segment)
+                    rest = [city for city in tour if city not in seg_set]
+                    at = rest.index(u) + 1
+                    tour[:] = rest[:at] + segment + rest[at:]
+                    pos = {city: idx for idx, city in enumerate(tour)}
+                    total += 1
+                    improved = True
+        return total
+
+    def or_opt(self, initial_tour: Optional[List[int]] = None,
+               max_segment: int = 3,
+               neighbors: Optional[int] = 10) -> Tuple[List[int], float]:
+        """
+        Or-opt local search: relocate segments of up to `max_segment`
+        cities (in either orientation) to a cheaper position.
+
+        Args:
+            initial_tour: Starting tour (default: Nearest Neighbor)
+            max_segment: Longest segment moved
+            neighbors: Insertion points considered per segment endpoint
+                (k nearest cities; None = all)
+        """
+        if initial_tour is None:
+            tour, _ = self.nearest_neighbor()
+        else:
+            tour = list(initial_tour)
+        self._or_opt_pass(tour, self._neighbor_lists(neighbors), max_segment)
         return tour, self.calculate_tour_distance(tour)
+
+    def _local_search(self, tour: List[int], neighbors: Optional[int] = None,
+                      or_opt_neighbors: Optional[int] = 10) -> None:
+        """In-place 2-opt and Or-opt, alternated until neither improves."""
+        full = self._neighbor_lists(neighbors)
+        near = self._neighbor_lists(or_opt_neighbors)
+        self._two_opt_dlb(tour, full)
+        while self._or_opt_pass(tour, near):
+            self._two_opt_dlb(tour, full)
+
+    def local_search(self, initial_tour: Optional[List[int]] = None,
+                     neighbors: Optional[int] = None) -> Tuple[List[int], float]:
+        """
+        2-opt followed by Or-opt, repeated until neither improves.
+
+        Args:
+            initial_tour: Starting tour (default: Nearest Neighbor)
+            neighbors: Neighbor-list size for 2-opt (None = all cities)
+        """
+        if initial_tour is None:
+            tour, _ = self.nearest_neighbor()
+        else:
+            tour = list(initial_tour)
+        self._local_search(tour, neighbors)
+        return tour, self.calculate_tour_distance(tour)
+
+    def _double_bridge(self, tour: List[int]) -> Tuple[List[int], List[int]]:
+        """Random double-bridge kick (a 4-opt move 2-opt cannot undo).
+        Returns the new tour and the cities whose edges changed."""
+        n = len(tour)
+        a, b, c = sorted(self.rng.sample(range(1, n), 3))
+        new = tour[:a] + tour[b:c] + tour[a:b] + tour[c:]
+        touched = [tour[a - 1], tour[a], tour[b - 1], tour[b],
+                   tour[c - 1], tour[c % n], tour[0], tour[-1]]
+        return new, touched
+
+    def iterated_local_search(self, initial_tour: Optional[List[int]] = None,
+                              iterations: int = 1000,
+                              neighbors: Optional[int] = None) -> Tuple[List[int], float]:
+        """
+        Iterated local search: repeatedly apply a random double-bridge kick
+        to the best tour, re-optimize locally with 2-opt (only around the
+        kicked edges), and keep the result if it is shorter. The final best
+        tour is polished with Or-opt.
+
+        Args:
+            initial_tour: Starting tour (default: Nearest Neighbor)
+            iterations: Number of kicks
+            neighbors: Neighbor-list size for 2-opt (None = all cities)
+        """
+        if initial_tour is None:
+            best, _ = self.nearest_neighbor()
+        else:
+            best = list(initial_tour)
+        n = len(best)
+        self._local_search(best, neighbors)
+        if n < 8:
+            return best, self.calculate_tour_distance(best)
+
+        full = self._neighbor_lists(neighbors)
+        best_distance = self.calculate_tour_distance(best)
+        for _ in range(iterations):
+            candidate, touched = self._double_bridge(best)
+            self._two_opt_dlb(candidate, full, queue=touched)
+            distance = self.calculate_tour_distance(candidate)
+            if distance < best_distance - EPSILON:
+                best, best_distance = candidate, distance
+
+        self._local_search(best, neighbors)
+        return best, self.calculate_tour_distance(best)
 
     def three_opt(self, initial_tour: Optional[List[int]] = None,
                   max_iterations: int = 100) -> Tuple[List[int], float]:
@@ -471,6 +707,8 @@ class TSPSolver:
         'nearest_insertion': 'nearest_insertion',
         '2-opt': 'two_opt',
         '3-opt': 'three_opt',
+        '2-opt+or-opt': 'local_search',
+        'iterated_local_search': 'iterated_local_search',
         'simulated_annealing': 'simulated_annealing',
         'genetic_algorithm': 'genetic_algorithm',
     }
