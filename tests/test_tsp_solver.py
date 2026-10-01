@@ -322,3 +322,13 @@ def test_compare_algorithms_results_do_not_depend_on_order():
     after = TSPSolver(cities, seed=7).compare_algorithms(
         ["iterated_local_search", "genetic_algorithm", "simulated_annealing"])
     assert alone["simulated_annealing"]["tour"] == after["simulated_annealing"]["tour"]
+
+
+@pytest.mark.parametrize("neighbors", [None, 3, 10])
+def test_simulated_annealing_move_strategies(neighbors):
+    solver = TSPSolver(generate_random_cities(40, seed=8), seed=8)
+    _, start_distance = solver.nearest_neighbor()
+    tour, distance = solver.simulated_annealing(max_iterations=20000,
+                                                neighbors=neighbors)
+    assert_valid(solver, tour, distance)
+    assert distance <= start_distance + 1e-9

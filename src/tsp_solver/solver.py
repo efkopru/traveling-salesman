@@ -654,11 +654,14 @@ class TSPSolver:
                             cooling_rate: Optional[float] = None,
                             min_temp: Optional[float] = None,
                             max_iterations: int = 100000,
-                            polish: bool = True) -> Tuple[List[int], float]:
+                            polish: bool = True,
+                            neighbors: Optional[int] = 5) -> Tuple[List[int], float]:
         """
         Simulated annealing metaheuristic.
 
-        Uses random 2-opt moves evaluated in O(1).
+        Uses random 2-opt moves evaluated in O(1). By default a move joins
+        a random city to one of its `neighbors` nearest cities, which wastes
+        far fewer iterations than moves between random cities.
 
         Args:
             initial_temp: Starting temperature. If None, derived from the
@@ -670,6 +673,8 @@ class TSPSolver:
                 derived from the instance.
             max_iterations: Maximum number of moves attempted
             polish: Finish with 2-opt + Or-opt on the best tour found
+            neighbors: Draw moves from each city's k nearest cities (None =
+                reverse a uniformly random segment)
         """
         n = self.n_cities
         # Start with nearest neighbor solution
@@ -691,11 +696,34 @@ class TSPSolver:
         temp = initial_temp
         iteration = 0
 
+        if neighbors is None:
+            def propose():
+                return self._random_two_opt_move(current_tour)
+        else:
+            near = self._neighbor_lists(neighbors)
+            pos = [0] * n
+            for idx, city in enumerate(current_tour):
+                pos[city] = idx
+            D = self._dist
+
+            def propose():
+                """2-opt move adding edge (a, c), c one of a's nearest cities:
+                reverse current_tour[i:j] with i = pos[a] + 1, j = pos[c] + 1
+                (positions ordered)."""
+                a = rng.randrange(n)
+                c = near[a][rng.randrange(len(near[a]))]
+                i, j = sorted((pos[a], pos[c]))
+                if j - i < 2 or (i == 0 and j == n - 1):
+                    return None
+                A, B = current_tour[i], current_tour[i + 1]
+                C, Dn = current_tour[j], current_tour[(j + 1) % n]
+                return i + 1, j + 1, D[A][C] + D[B][Dn] - D[A][B] - D[C][Dn]
+
         while temp > min_temp and iteration < max_iterations:
             temp *= cooling_rate
             iteration += 1
 
-            move = self._random_two_opt_move(current_tour)
+            move = propose()
             if move is None:
                 continue
             i, j, delta = move
@@ -703,6 +731,9 @@ class TSPSolver:
             # Accept or reject move
             if delta < 0 or rng.random() < math.exp(-delta / temp):
                 current_tour[i:j] = reversed(current_tour[i:j])
+                if neighbors is not None:
+                    for idx in range(i, j):
+                        pos[current_tour[idx]] = idx
                 current_distance += delta
 
                 if current_distance < best_distance - EPSILON:
