@@ -11,6 +11,7 @@ Also available as `python -m tsp_solver`.
 
 import argparse
 import csv
+import os
 import sys
 from typing import List, Optional, Tuple
 
@@ -30,6 +31,17 @@ def positive_int(text: str) -> int:
     return value
 
 
+def require_writable(parser, path: Optional[str], option: str) -> None:
+    """Fail before solving if an output file cannot be created."""
+    if path is None:
+        return
+    directory = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(directory):
+        parser.error(f"{option}: directory does not exist: {directory}")
+    if not os.access(directory, os.W_OK):
+        parser.error(f"{option}: directory is not writable: {directory}")
+
+
 def require_matplotlib(parser) -> None:
     """Fail before solving if a plot is requested without matplotlib."""
     try:
@@ -44,7 +56,9 @@ def read_csv_cities(path: str) -> Tuple[np.ndarray, List[str]]:
     A first row that is not numeric is treated as a header.
     """
     coords, names = [], []
-    with open(path, newline='') as f:
+    # utf-8-sig drops the byte-order mark Excel writes in "CSV UTF-8" files;
+    # left in place it would make the first row look like a header.
+    with open(path, newline='', encoding='utf-8-sig') as f:
         for row_number, row in enumerate(csv.reader(f), start=1):
             row = [cell.strip() for cell in row]
             if not row or not any(row):
@@ -68,8 +82,10 @@ def build_solver(args) -> Tuple[TSPSolver, str, Optional[float]]:
     if args.random is not None:
         seed = 42 if args.seed is None else args.seed
         cities = generate_random_cities(args.random, seed=seed)
+        # The printed seed also drives the randomized algorithms, so the
+        # run is reproducible from its own output.
         solver = TSPSolver(cities, [f"C{i}" for i in range(args.random)],
-                           seed=args.seed)
+                           seed=seed)
         return solver, f"{args.random} random cities (seed {seed})", None
 
     if args.input.lower().endswith('.tsp'):
@@ -89,14 +105,15 @@ def cmd_solve(args, parser) -> int:
         parser.error("give either an input file or --random N")
     if args.plot:
         require_matplotlib(parser)
+    require_writable(parser, args.plot, '--plot')
+    require_writable(parser, args.tour_out, '--tour-out')
     try:
         solver, description, optimum = build_solver(args)
     except (OSError, ValueError) as error:
         parser.error(str(error))
 
     algorithms = args.algo or [DEFAULT_ALGORITHM]
-    skipped = [a for a in algorithms
-               if solver.n_cities > solver.EXACT_LIMITS.get(a, solver.n_cities)]
+    skipped = [a for a in algorithms if solver.exceeds_size_limit(a)]
     for algo in skipped:
         print(f"Skipping {algo}: limited to {solver.EXACT_LIMITS[algo]} cities",
               file=sys.stderr)
@@ -124,18 +141,23 @@ def cmd_solve(args, parser) -> int:
     print(f"\nBest: {best_algo}, distance {best['distance']:.2f}")
     print("Tour: " + " -> ".join(names + names[:1]))
 
-    if args.tour_out:
-        with open(args.tour_out, 'w') as f:
-            f.write("\n".join(names) + "\n")
-    if args.plot:
-        solver.visualize_tour(best['tour'], f"{description}: {best_algo}",
-                              save_path=args.plot, show=False)
+    try:
+        if args.tour_out:
+            with open(args.tour_out, 'w') as f:
+                f.write("\n".join(names) + "\n")
+        if args.plot:
+            solver.visualize_tour(best['tour'], f"{description}: {best_algo}",
+                                  save_path=args.plot, show=False)
+    except OSError as error:
+        print(f"tsp-solver: could not write output: {error}", file=sys.stderr)
+        return 1
     return 0
 
 
 def cmd_demo(args, parser) -> int:
     if args.plot or args.show:
         require_matplotlib(parser)
+    require_writable(parser, args.plot, '--plot')
     from .demo import run_demo
     run_demo(show=args.show, save_path=args.plot)
     return 0
@@ -161,7 +183,8 @@ def build_parser() -> argparse.ArgumentParser:
                             f"(default: {DEFAULT_ALGORITHM}). Choices: "
                             f"{', '.join(TSPSolver.ALGORITHMS)}")
     solve.add_argument('--seed', type=int,
-                       help='seed for randomized algorithms and --random')
+                       help='seed for the randomized algorithms (and for --random '
+                            'cities; --random defaults to 42)')
     solve.add_argument('--plot', metavar='PNG',
                        help='save a plot of the best tour (needs matplotlib)')
     solve.add_argument('--tour-out', metavar='FILE',
