@@ -30,11 +30,11 @@ def run_example(show: bool = True, save_path: Optional[str] = None):
     # Print results
     print("\nAlgorithm Comparison:")
     print("-" * 60)
-    print(f"{'Algorithm':<20} {'Distance':<15} {'Time (s)':<15}")
+    print(f"{'Algorithm':<22} {'Distance':<15} {'Time (s)'}")
     print("-" * 60)
 
     for algo, result in results.items():
-        print(f"{algo:<20} {result['distance']:<15.2f} {result['time']:<15.4f}")
+        print(f"{algo:<22} {result['distance']:<15.2f} {result['time']:.4f}")
 
     # Find best solution
     best_algo = min(results.keys(), key=lambda x: results[x]['distance'])
@@ -73,4 +73,5 @@ def run_demo(show: bool = False, save_path: Optional[str] = None):
 
     print(f"Exact Solution: {exact_dist:.2f}")
     print(f"Heuristic Solution: {heuristic_dist:.2f}")
-    print(f"Gap: {(heuristic_dist - exact_dist) / exact_dist * 100:.2f}%")
+    gap = (heuristic_dist - exact_dist) / exact_dist * 100
+    print(f"Gap: {max(gap, 0.0):.2f}%")  # clamp floating-point noise (-0.00%)

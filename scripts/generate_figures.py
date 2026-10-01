@@ -4,12 +4,14 @@ Regenerate the README figures and results table.
 Usage (from the repository root, after `pip install -e ".[dev]"`):
     python scripts/generate_figures.py
 
-Writes PNGs to images/ and prints the README results table as Markdown.
+Writes PNGs to images/ and prints the README results tables as Markdown.
 Distances are deterministic (fixed instance and solver seeds); times depend
 on the machine.
 """
 
+import glob
 import os
+import time
 
 import matplotlib
 import matplotlib.ticker
@@ -17,7 +19,8 @@ import matplotlib.ticker
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from tsp_solver import TSPSolver, generate_random_cities  # noqa: E402
+from tsp_solver import (TSPBenchmark, TSPSolver,  # noqa: E402
+                        generate_random_cities)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -27,15 +30,23 @@ SEED = 42
 TIMING_RUNS = 3
 
 ALGORITHMS = ["nearest_neighbor", "nearest_insertion", "2-opt", "3-opt",
-              "simulated_annealing", "genetic_algorithm"]
+              "2-opt+or-opt", "iterated_local_search", "simulated_annealing",
+              "genetic_algorithm"]
 LABELS = {
     "nearest_neighbor": "Nearest Neighbor",
     "nearest_insertion": "Nearest Insertion",
     "2-opt": "2-Opt",
     "3-opt": "3-Opt",
+    "2-opt+or-opt": "2-Opt + Or-Opt",
+    "iterated_local_search": "Iterated Local Search",
     "simulated_annealing": "Simulated Annealing",
     "genetic_algorithm": "Genetic Algorithm",
 }
+TSPLIB_FILES = sorted(glob.glob(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "tsplib", "*.tsp")))
+SCALING_SIZES = (200, 500, 1000)
+SCALING_ALGORITHMS = ["2-opt", "2-opt+or-opt", "iterated_local_search"]
 
 # Chart chrome (light surface) and series color
 SURFACE = "#fcfcfb"
@@ -112,7 +123,7 @@ def plot_tour_comparison(results, n=50):
     """Small multiples: the tour each algorithm finds on one instance."""
     data = results[n]
     cities = data["solver"].cities
-    fig, axes = plt.subplots(2, 3, figsize=(12, 8.4))
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8.6))
     for ax, algo in zip(axes.flat, ALGORITHMS):
         info = data["algos"][algo]
         tour = info["tour"] + info["tour"][:1]
@@ -172,18 +183,11 @@ def plot_quality_vs_time(results, n=100):
     ys = [data[a]["gap"] for a in ALGORITHMS]
     ax.scatter(xs, ys, s=64, color=SERIES, edgecolor=SURFACE, linewidth=2,
                zorder=3)
-    # 3-Opt and Simulated Annealing sit close together near zero, so their
-    # labels go on opposite sides.
-    offsets = {"3-opt": (-8, 8, "right"), "simulated_annealing": (8, 8, "left")}
-    for a, x, y in zip(ALGORITHMS, xs, ys):
-        dx, dy, ha = offsets.get(a, (8, 4, "left"))
-        ax.annotate(LABELS[a], (x, y), xytext=(dx, dy), textcoords="offset points",
-                    ha=ha, color=INK_SECONDARY, fontsize=9)
     ax.set_xscale("log")
     ax.xaxis.set_major_formatter(
         matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g} s"))
     ax.set_xlim(min(xs) / 3, max(xs) * 8)
-    ax.set_ylim(-5, max(ys) * 1.12)
+    ax.set_ylim(-max(ys) * 0.12, max(ys) * 1.12)
     ax.set_xlabel("Runtime (log scale)")
     ax.set_ylabel("% above best result")
     ax.grid(True, color=GRID, linewidth=0.8)
@@ -191,7 +195,60 @@ def plot_quality_vs_time(results, n=100):
     ax.set_title(f"Quality vs. runtime, {n} cities (lower left is better)",
                  loc="left", fontsize=13, fontweight="bold")
     fig.tight_layout()
+    place_labels(ax, xs, ys, [LABELS[a] for a in ALGORITHMS])
     save(fig, f"quality_vs_time_{n}.png")
+
+
+def place_labels(ax, xs, ys, labels, pad_px=10, gap_px=3, dot_px=7):
+    """
+    Label each point beside it without overlapping other labels or points.
+
+    For each point (bottom to top) try, in order: right of the point, left
+    of the point, then right with increasing vertical shifts (alternating
+    up and down). A thin leader line joins a label that had to move away
+    from its point. Works in pixels, so it is independent of the log axis
+    and of where the timing-dependent points land.
+    """
+    fig = ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    to_px = ax.transData.transform
+    from_px = ax.transData.inverted().transform
+    points = [to_px((x, y)) for x, y in zip(xs, ys)]
+    obstacles = [(px - dot_px, py - dot_px, px + dot_px, py + dot_px)
+                 for px, py in points]
+
+    def overlaps(box):
+        x0, y0, x1, y1 = box
+        return any(x0 < b1 and b0 < x1 and y0 < c1 and c0 < y1
+                   for b0, c0, b1, c1 in obstacles)
+
+    order = sorted(range(len(labels)), key=lambda i: points[i][1])
+    for i in order:
+        px, py = points[i]
+        probe = ax.text(0, 0, labels[i], fontsize=9)
+        box = probe.get_window_extent(renderer)
+        probe.remove()
+        w, h = box.width, box.height
+
+        candidates = [(px + pad_px, py), (px - pad_px - w, py)]
+        for step in range(1, 12):
+            shift = step * (h + gap_px) / 2
+            candidates += [(px + pad_px, py + shift), (px + pad_px, py - shift),
+                           (px - pad_px - w, py + shift), (px - pad_px - w, py - shift)]
+        for lx, ly in candidates:
+            rect = (lx - gap_px, ly - h / 2 - gap_px, lx + w + gap_px, ly + h / 2 + gap_px)
+            if not overlaps(rect):
+                break
+        obstacles.append(rect)
+
+        x, y = from_px((px, py))
+        tx, ty = from_px((lx, ly))
+        moved = abs(ly - py) > 1
+        ax.annotate(labels[i], (x, y), xytext=(tx, ty), textcoords="data",
+                    va="center", ha="left", color=INK_SECONDARY, fontsize=9,
+                    arrowprops=dict(arrowstyle="-", color=BASELINE, linewidth=0.8,
+                                    shrinkA=2, shrinkB=5) if moved else None)
 
 
 def print_table(results):
@@ -211,6 +268,83 @@ def print_table(results):
         print(f"| {LABELS[a]} | " + " | ".join(cells) + f" | {t:.4f} |")
 
 
+def run_tsplib():
+    """Gap to the published optimum on the bundled TSPLIB instances."""
+    df = TSPBenchmark.run_tsplib_benchmark(TSPLIB_FILES, ALGORITHMS, seed=SEED)
+    order = {name: i for i, name in enumerate(
+        df.drop_duplicates("Instance").sort_values("Cities")["Instance"])}
+    return df.assign(order=df["Instance"].map(order)).sort_values("order")
+
+
+def plot_tsplib_gap(df):
+    """Small multiples: % above the known optimum, one panel per instance."""
+    instances = list(dict.fromkeys(df["Instance"]))
+    fig, axes = plt.subplots(1, len(instances), figsize=(15, 4), sharey=True)
+    order = list(reversed(ALGORITHMS))
+    max_gap = df["Gap (%)"].max()
+    for ax, name in zip(axes, instances):
+        sub = df[df["Instance"] == name].set_index("Algorithm")
+        gaps = [sub.loc[a, "Gap (%)"] for a in order]
+        ax.barh(range(len(order)), gaps, height=0.6, color=SERIES)
+        for y, g in enumerate(gaps):
+            text = "optimal" if g < 0.005 else f"+{g:.1f}%"
+            ax.text(g + max_gap * 0.02, y, text, va="center",
+                    color=INK_SECONDARY, fontsize=9)
+        ax.set_yticks(range(len(order)))
+        ax.set_yticklabels([LABELS[a] for a in order], color=INK_SECONDARY)
+        ax.set_xlim(0, max_gap * 1.3)
+        ax.set_title(f"{name} (optimum {int(sub['Optimum'].iloc[0])})",
+                     loc="left", fontsize=11, fontweight="bold")
+        ax.xaxis.grid(True, color=GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis="y", length=0)
+        ax.spines["left"].set_color(BASELINE)
+        ax.set_xlabel("% above optimum")
+    fig.suptitle("TSPLIB instances: gap to the published optimal tour",
+                 x=0.02, ha="left", fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    save(fig, "tsplib_gap.png")
+
+
+def print_tsplib_table(df):
+    instances = list(dict.fromkeys(df["Instance"]))
+    optima = df.drop_duplicates("Instance").set_index("Instance")["Optimum"]
+    print("\n| Algorithm | " + " | ".join(
+        f"{name} ({int(optima[name])})" for name in instances) + " |")
+    print("|-----------|" + "-----------|" * len(instances))
+    for a in ALGORITHMS:
+        cells = []
+        for name in instances:
+            row = df[(df["Instance"] == name) & (df["Algorithm"] == a)].iloc[0]
+            if row["Gap (%)"] < 0.005:
+                cells.append(f"**{row['Distance']:.0f}**")
+            else:
+                cells.append(f"{row['Distance']:.0f} (+{row['Gap (%)']:.1f}%)")
+        print(f"| {LABELS[a]} | " + " | ".join(cells) + " |")
+
+
+def print_scaling_table():
+    """Runtime and length of the local searches on larger random instances."""
+    print("\n| Algorithm | " + " | ".join(f"{n} cities" for n in SCALING_SIZES) + " |")
+    print("|-----------|" + "-----------|" * len(SCALING_SIZES))
+    rows = {a: [] for a in SCALING_ALGORITHMS}
+    for n in SCALING_SIZES:
+        results = TSPSolver(generate_random_cities(n), seed=SEED) \
+            .compare_algorithms(SCALING_ALGORITHMS)
+        for a in SCALING_ALGORITHMS:
+            rows[a].append(f"{results[a]['distance']:.1f} ({results[a]['time']:.2f} s)")
+    for a in SCALING_ALGORITHMS:
+        print(f"| {LABELS[a]} | " + " | ".join(rows[a]) + " |")
+
+
+def print_exact_20():
+    solver = TSPSolver(generate_random_cities(20))
+    start = time.perf_counter()
+    _, distance = solver.held_karp()
+    print(f"\nHeld-Karp optimum, 20 cities: {distance:.2f} "
+          f"({time.perf_counter() - start:.2f} s)")
+
+
 def main():
     os.makedirs(IMAGES, exist_ok=True)
     results = run_all()
@@ -218,7 +352,12 @@ def main():
     plot_tour_comparison(results)
     plot_gap_by_size(results)
     plot_quality_vs_time(results)
+    tsplib = run_tsplib()
+    plot_tsplib_gap(tsplib)
     print_table(results)
+    print_tsplib_table(tsplib)
+    print_scaling_table()
+    print_exact_20()
 
 
 if __name__ == "__main__":
