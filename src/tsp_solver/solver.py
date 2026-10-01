@@ -82,6 +82,7 @@ class TSPSolver:
         self.cities = np.asarray(cities, dtype=float)
         self.n_cities = len(self.cities)
         self.city_names = city_names or [f"City_{i}" for i in range(self.n_cities)]
+        self.seed = seed
         self.rng = random.Random(seed)
         self.distance_matrix = self._calculate_distance_matrix()
         # Plain nested lists are much faster than numpy for scalar lookups
@@ -904,6 +905,10 @@ class TSPSolver:
             if self.n_cities > self.EXACT_LIMITS.get(algo, self.n_cities):
                 continue
 
+            if self.seed is not None:
+                # Each algorithm sees the same random stream, so its result
+                # does not depend on which algorithms ran before it.
+                self.rng.seed(self.seed)
             start_time = time.perf_counter()
             tour, distance = getattr(self, self.ALGORITHMS[algo])()
             execution_time = time.perf_counter() - start_time
