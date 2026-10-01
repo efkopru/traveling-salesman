@@ -21,6 +21,94 @@ from typing import List, Tuple, Dict, Optional
 EPSILON = 1e-10
 
 
+def _tsplib_nint(x: np.ndarray) -> np.ndarray:
+    """TSPLIB nint(): round half up, i.e. (int)(x + 0.5)."""
+    return np.floor(x + 0.5)
+
+
+def _att_distance(squared: np.ndarray) -> np.ndarray:
+    """TSPLIB ATT pseudo-Euclidean distance."""
+    r = np.sqrt(squared / 10.0)
+    t = _tsplib_nint(r)
+    return np.where(t < r, t + 1, t)
+
+
+# Distance from squared Euclidean distance, per convention.
+DISTANCE_FUNCTIONS = {
+    'euclidean': np.sqrt,
+    'EUC_2D': lambda sq: _tsplib_nint(np.sqrt(sq)),
+    'CEIL_2D': lambda sq: np.ceil(np.sqrt(sq)),
+    'ATT': _att_distance,
+}
+
+# Published optimal tour lengths for the instances bundled in data/tsplib.
+TSPLIB_OPTIMA = {
+    'eil51': 426,
+    'berlin52': 7542,
+    'st70': 675,
+    'kroA100': 21282,
+}
+
+
+def load_tsplib(path: str) -> Dict:
+    """
+    Read a symmetric TSPLIB .tsp file with node coordinates.
+
+    Supported EDGE_WEIGHT_TYPEs: EUC_2D, CEIL_2D, ATT.
+
+    Returns:
+        Dict with 'name', 'comment', 'dimension', 'edge_weight_type',
+        'coordinates' (array of shape (n, 2)), 'city_names' (node ids as
+        strings) and 'optimum' (from TSPLIB_OPTIMA, or None).
+    """
+    header = {}
+    ids, coords = [], []
+    in_coords = False
+    with open(path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            if line == 'EOF':
+                break
+            if in_coords:
+                parts = line.split()
+                if len(parts) < 3 or not parts[0].lstrip('-').isdigit():
+                    in_coords = False      # start of another section
+                else:
+                    ids.append(parts[0])
+                    coords.append((float(parts[1]), float(parts[2])))
+                    continue
+            if line.startswith('NODE_COORD_SECTION'):
+                in_coords = True
+            elif ':' in line:
+                key, value = line.split(':', 1)
+                header[key.strip().upper()] = value.strip()
+
+    if header.get('TYPE', 'TSP').split()[0] != 'TSP':
+        raise ValueError(f"Only symmetric TSP files are supported "
+                         f"(TYPE: {header.get('TYPE')})")
+    edge_type = header.get('EDGE_WEIGHT_TYPE', '')
+    if edge_type not in ('EUC_2D', 'CEIL_2D', 'ATT'):
+        raise ValueError(f"Unsupported EDGE_WEIGHT_TYPE '{edge_type}'; "
+                         f"supported: EUC_2D, CEIL_2D, ATT")
+    dimension = int(header.get('DIMENSION', len(coords)))
+    if len(coords) != dimension:
+        raise ValueError(f"DIMENSION is {dimension} but {len(coords)} "
+                         f"coordinates were read")
+
+    name = header.get('NAME', '')
+    return {
+        'name': name,
+        'comment': header.get('COMMENT', ''),
+        'dimension': dimension,
+        'edge_weight_type': edge_type,
+        'coordinates': np.array(coords),
+        'city_names': ids,
+        'optimum': TSPLIB_OPTIMA.get(name),
+    }
+
+
 class TSPSolver:
     """
     A comprehensive TSP solver implementing multiple algorithms.
@@ -39,7 +127,7 @@ class TSPSolver:
     """
 
     def __init__(self, cities: np.ndarray, city_names: Optional[List[str]] = None,
-                 seed: Optional[int] = None):
+                 seed: Optional[int] = None, distance: str = 'euclidean'):
         """
         Initialize TSP solver with city coordinates.
 
@@ -47,8 +135,17 @@ class TSPSolver:
             cities: Array of shape (n, 2) with city coordinates
             city_names: Optional list of city names
             seed: Optional seed for the randomized algorithms (simulated
-                annealing, genetic algorithm), for reproducible results
+                annealing, genetic algorithm, iterated local search), for
+                reproducible results
+            distance: 'euclidean' (default), or a TSPLIB convention:
+                'EUC_2D' (rounded to nearest integer), 'CEIL_2D' (rounded
+                up) or 'ATT' (pseudo-Euclidean). Use the TSPLIB convention
+                to compare against published optimal tour lengths.
         """
+        if distance not in DISTANCE_FUNCTIONS:
+            raise ValueError(f"Unknown distance '{distance}'. "
+                             f"Choose from {list(DISTANCE_FUNCTIONS)}")
+        self.distance = distance
         self.cities = np.asarray(cities, dtype=float)
         self.n_cities = len(self.cities)
         self.city_names = city_names or [f"City_{i}" for i in range(self.n_cities)]
@@ -59,9 +156,19 @@ class TSPSolver:
         self._dist = self.distance_matrix.tolist()
 
     def _calculate_distance_matrix(self) -> np.ndarray:
-        """Calculate Euclidean distance matrix between all cities."""
+        """Calculate the distance matrix between all cities."""
+        if self.n_cities == 0:
+            return np.zeros((0, 0))
         diff = self.cities[:, np.newaxis, :] - self.cities[np.newaxis, :, :]
-        return np.sqrt((diff ** 2).sum(axis=-1))
+        return DISTANCE_FUNCTIONS[self.distance]((diff ** 2).sum(axis=-1))
+
+    @classmethod
+    def from_tsplib(cls, path: str, seed: Optional[int] = None) -> 'TSPSolver':
+        """Create a solver from a TSPLIB .tsp file, using the file's
+        distance convention (EDGE_WEIGHT_TYPE)."""
+        instance = load_tsplib(path)
+        return cls(instance['coordinates'], instance['city_names'], seed=seed,
+                   distance=instance['edge_weight_type'])
 
     def calculate_tour_distance(self, tour: List[int]) -> float:
         """Calculate total distance of a tour."""
@@ -967,6 +1074,33 @@ class TSPBenchmark:
                     'Time': result['time']
                 })
 
+        return pd.DataFrame(results)
+
+    @staticmethod
+    def run_tsplib_benchmark(paths: List[str], algorithms: List[str],
+                             seed: Optional[int] = None) -> pd.DataFrame:
+        """
+        Run algorithms on TSPLIB files and report the gap to the published
+        optimum (TSPLIB_OPTIMA) where known.
+        """
+        results = []
+        for path in paths:
+            instance = load_tsplib(path)
+            solver = TSPSolver(instance['coordinates'], instance['city_names'],
+                               seed=seed, distance=instance['edge_weight_type'])
+            optimum = instance['optimum']
+            for algo, result in solver.compare_algorithms(algorithms).items():
+                gap = (None if optimum is None
+                       else 100 * (result['distance'] - optimum) / optimum)
+                results.append({
+                    'Instance': instance['name'],
+                    'Cities': instance['dimension'],
+                    'Algorithm': algo,
+                    'Distance': result['distance'],
+                    'Optimum': optimum,
+                    'Gap (%)': gap,
+                    'Time': result['time'],
+                })
         return pd.DataFrame(results)
 
 
