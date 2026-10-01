@@ -559,14 +559,27 @@ class TSPSolver:
 
         return best_tour, self.calculate_tour_distance(best_tour)
 
-    def genetic_algorithm(self, population_size: int = 100,
-                          generations: int = 500,
-                          mutation_rate: float = 0.02,
-                          elite_size: int = 20) -> Tuple[List[int], float]:
+    def genetic_algorithm(self, population_size: int = 30,
+                          generations: int = 100,
+                          mutation_rate: float = 0.2,
+                          elite_size: int = 4,
+                          neighbors: Optional[int] = 10) -> Tuple[List[int], float]:
         """
-        Genetic algorithm for TSP.
+        Memetic genetic algorithm for TSP.
 
-        Uses order crossover (OX) and swap mutation.
+        - Initial population: Nearest Neighbor tours from different start
+          cities (plus random tours if the population is larger than n),
+          each improved with 2-opt.
+        - Tournament selection, order crossover (OX), inversion mutation
+          (reverse a random segment), then 2-opt on every child.
+        - The `elite_size` best tours survive unchanged.
+
+        Args:
+            population_size: Tours per generation
+            generations: Number of generations
+            mutation_rate: Probability that a child is mutated
+            elite_size: Best tours copied to the next generation
+            neighbors: Neighbor-list size for the 2-opt step (None = all)
         """
         n = self.n_cities
         if n < 4:
@@ -574,24 +587,20 @@ class TSPSolver:
             return tour, self.calculate_tour_distance(tour)
 
         rng = self.rng
+        neighbor_lists = self._neighbor_lists(neighbors)
+        elite_size = min(elite_size, population_size)
 
-        def create_individual():
-            """Create random tour."""
-            return rng.sample(range(n), n)
+        def improve(tour):
+            self._two_opt_dlb(tour, neighbor_lists)
+            return tour
 
-        def fitness(individual):
-            """Fitness is inverse of distance."""
-            return 1 / self.calculate_tour_distance(individual)
-
-        def selection(population, scores):
-            """Tournament selection."""
-            tournament_size = min(5, len(population))
-            candidates = list(zip(population, scores))
+        def selection(population, distances):
+            """Tournament selection (shorter tour wins)."""
+            tournament_size = min(3, len(population))
             selected = []
             for _ in range(len(population)):
-                tournament = rng.sample(candidates, tournament_size)
-                winner = max(tournament, key=lambda x: x[1])
-                selected.append(winner[0])
+                contenders = rng.sample(range(len(population)), tournament_size)
+                selected.append(population[min(contenders, key=distances.__getitem__)])
             return selected
 
         def crossover(parent1, parent2):
@@ -612,42 +621,39 @@ class TSPSolver:
             return child
 
         def mutate(individual):
-            """Swap mutation."""
+            """Inversion mutation: reverse a random segment."""
             if rng.random() < mutation_rate:
-                i, j = rng.sample(range(len(individual)), 2)
-                individual[i], individual[j] = individual[j], individual[i]
+                i, j = sorted(rng.sample(range(len(individual)), 2))
+                individual[i:j + 1] = reversed(individual[i:j + 1])
             return individual
 
         # Initialize population
-        population = [create_individual() for _ in range(population_size)]
+        starts = rng.sample(range(n), min(n, population_size))
+        population = [improve(self.nearest_neighbor(c)[0]) for c in starts]
+        while len(population) < population_size:
+            population.append(improve(rng.sample(range(n), n)))
+        distances = [self.calculate_tour_distance(t) for t in population]
 
         for generation in range(generations):
-            # Calculate fitness
-            scores = [fitness(ind) for ind in population]
-
             # Elite preservation
-            elite_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:elite_size]
-            elite = [population[i] for i in elite_indices]
+            order = sorted(range(len(population)), key=distances.__getitem__)
+            elite = [population[i] for i in order[:elite_size]]
+            elite_distances = [distances[i] for i in order[:elite_size]]
 
-            # Selection and crossover
-            selected = selection(population, scores)
+            # Selection, crossover, mutation, local search
+            selected = selection(population, distances)
             children = []
-
-            for i in range(0, population_size - elite_size, 2):
+            for i in range(population_size - elite_size):
                 parent1 = selected[i]
-                parent2 = selected[i + 1] if i + 1 < len(selected) else selected[0]
-                child1 = crossover(parent1, parent2)
-                child2 = crossover(parent2, parent1)
-                children.extend([mutate(child1), mutate(child2)])
+                parent2 = selected[(i + 1) % len(selected)]
+                children.append(improve(mutate(crossover(parent1, parent2))))
 
-            # New population
-            population = elite + children[:population_size - elite_size]
+            population = elite + children
+            distances = elite_distances + [self.calculate_tour_distance(t)
+                                           for t in children]
 
-        # Return best solution
-        scores = [fitness(ind) for ind in population]
-        best_idx = scores.index(max(scores))
+        best_idx = min(range(len(population)), key=distances.__getitem__)
         best_tour = population[best_idx]
-
         return best_tour, self.calculate_tour_distance(best_tour)
 
     # ==================== VISUALIZATION ====================
