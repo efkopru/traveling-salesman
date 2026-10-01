@@ -74,4 +74,6 @@ def run_demo(show: bool = False, save_path: Optional[str] = None):
     print(f"Exact Solution: {exact_dist:.2f}")
     print(f"Heuristic Solution: {heuristic_dist:.2f}")
     gap = (heuristic_dist - exact_dist) / exact_dist * 100
-    print(f"Gap: {max(gap, 0.0):.2f}%")  # clamp floating-point noise (-0.00%)
+    if abs(gap) < 1e-9:
+        gap = 0.0  # floating-point noise would print as -0.00%
+    print(f"Gap: {gap:.2f}%")
