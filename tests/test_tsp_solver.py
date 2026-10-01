@@ -1,7 +1,10 @@
+import os
+
 import numpy as np
 import pytest
 
-from tsp_solver import TSPSolver, TSPBenchmark, generate_random_cities
+from tsp_solver import (TSPLIB_OPTIMA, TSPBenchmark, TSPSolver,
+                        generate_random_cities, load_tsplib)
 
 HEURISTICS = ["nearest_neighbor", "nearest_insertion", "two_opt", "three_opt",
               "or_opt", "local_search", "iterated_local_search",
@@ -243,3 +246,71 @@ def test_held_karp_rejects_large_instances():
 def test_compare_algorithms_skips_held_karp_above_limit():
     solver = TSPSolver(generate_random_cities(21))
     assert "held_karp" not in solver.compare_algorithms(["held_karp"])
+
+
+TSPLIB_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "tsplib")
+
+
+@pytest.mark.parametrize("name, dimension", [("eil51", 51), ("berlin52", 52),
+                                             ("st70", 70), ("kroA100", 100)])
+def test_load_bundled_tsplib_instances(name, dimension):
+    instance = load_tsplib(os.path.join(TSPLIB_DIR, f"{name}.tsp"))
+    assert instance["name"] == name
+    assert instance["dimension"] == dimension
+    assert instance["coordinates"].shape == (dimension, 2)
+    assert instance["edge_weight_type"] == "EUC_2D"
+    assert instance["optimum"] == TSPLIB_OPTIMA[name]
+
+
+def test_from_tsplib_uses_rounded_distances_and_reaches_optimum():
+    solver = TSPSolver.from_tsplib(os.path.join(TSPLIB_DIR, "berlin52.tsp"), seed=42)
+    D = solver.distance_matrix
+    assert np.array_equal(D, np.round(D))
+    tour, distance = solver.iterated_local_search()
+    assert_valid(solver, tour, distance)
+    assert distance == TSPLIB_OPTIMA["berlin52"]
+
+
+def write_tsp(tmp_path, edge_type, coords, dimension=None, tsp_type="TSP"):
+    lines = ["NAME : tiny", f"TYPE : {tsp_type}",
+             f"DIMENSION : {dimension or len(coords)}",
+             f"EDGE_WEIGHT_TYPE : {edge_type}", "NODE_COORD_SECTION"]
+    lines += [f"{i + 1} {x} {y}" for i, (x, y) in enumerate(coords)]
+    lines.append("EOF")
+    path = tmp_path / "tiny.tsp"
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def test_tsplib_distance_conventions(tmp_path):
+    coords = [(0, 0), (1.5, 0), (0, 2.6)]
+    euc = TSPSolver.from_tsplib(write_tsp(tmp_path, "EUC_2D", coords))
+    assert euc.distance_matrix[0, 1] == 2      # nint(1.5) = 2
+    assert euc.distance_matrix[0, 2] == 3      # nint(2.6) = 3
+    ceil = TSPSolver.from_tsplib(write_tsp(tmp_path, "CEIL_2D", coords))
+    assert ceil.distance_matrix[0, 1] == 2 and ceil.distance_matrix[0, 2] == 3
+    att = TSPSolver.from_tsplib(write_tsp(tmp_path, "ATT", [(0, 0), (10, 0)]))
+    # r = sqrt(100 / 10) = 3.162..., nint(r) = 3 < r, so distance 4
+    assert att.distance_matrix[0, 1] == 4
+    assert TSPSolver(coords).distance_matrix[0, 1] == pytest.approx(1.5)
+
+
+def test_tsplib_rejects_unsupported_files(tmp_path):
+    with pytest.raises(ValueError):
+        load_tsplib(write_tsp(tmp_path, "GEO", [(0, 0), (1, 1)]))
+    with pytest.raises(ValueError):
+        load_tsplib(write_tsp(tmp_path, "EUC_2D", [(0, 0), (1, 1)], tsp_type="ATSP"))
+    with pytest.raises(ValueError):
+        load_tsplib(write_tsp(tmp_path, "EUC_2D", [(0, 0), (1, 1)], dimension=3))
+    with pytest.raises(ValueError):
+        TSPSolver([(0, 0), (1, 1)], distance="manhattan")
+
+
+def test_run_tsplib_benchmark_reports_gap():
+    df = TSPBenchmark.run_tsplib_benchmark(
+        [os.path.join(TSPLIB_DIR, "eil51.tsp")], ["nearest_neighbor", "2-opt"], seed=0)
+    assert list(df["Instance"]) == ["eil51", "eil51"]
+    assert (df["Optimum"] == 426).all()
+    assert (df["Gap (%)"] >= 0).all()
+    nn, two = df["Distance"]
+    assert two <= nn
