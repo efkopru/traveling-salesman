@@ -342,6 +342,15 @@ This TSP solver can be applied to various optimization problems:
 4. **For reproducible results**: Pass `seed=` to `TSPSolver`
 5. **For guaranteed optimal (≤20 cities)**: Use Held-Karp
 
+## Roadmap
+
+Suggested next improvements (contributions welcome):
+
+- **Larger TSPLIB benchmarks**: bundle instances with 1,000+ cities (e.g. `pr1002`, `d1291`) and add a quality-vs-runtime chart at that scale.
+- **Lin–Kernighan-style moves**: variable-depth k-opt moves (as in LKH) are the next step in tour quality beyond 2-Opt + Or-Opt.
+- **Faster metaheuristics**: simulated annealing and the genetic algorithm run as pure-Python loops; compiling the inner loops with Numba or Cython could make them roughly 10–50× faster.
+- **PyPI release**: the package already installs with `pip install -e .`; publishing it (under a name still free on PyPI) would allow `pip install` without cloning the repository.
+
 ## References
 
 1. Applegate, D. L., Bixby, R. E., Chvatal, V., & Cook, W. J. (2006). *The Traveling Salesman Problem: A Computational Study*
