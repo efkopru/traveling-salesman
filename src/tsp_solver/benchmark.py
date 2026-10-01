@@ -66,8 +66,7 @@ class TSPBenchmark:
         results = []
         for path in paths:
             instance = load_tsplib(path)
-            solver = TSPSolver(instance['coordinates'], instance['city_names'],
-                               seed=seed, distance=instance['edge_weight_type'])
+            solver = TSPSolver.from_tsplib(instance, seed=seed)
             optimum = instance['optimum']
             for algo, result in solver.compare_algorithms(algorithms).items():
                 gap = (None if optimum is None

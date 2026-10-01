@@ -29,3 +29,5 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Lets `pytest` run from a plain checkout, without `pip install -e .`
+pythonpath = ["src"]
