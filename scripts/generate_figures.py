@@ -42,9 +42,7 @@ LABELS = {
     "simulated_annealing": "Simulated Annealing",
     "genetic_algorithm": "Genetic Algorithm",
 }
-TSPLIB_FILES = sorted(glob.glob(os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "tsplib", "*.tsp")))
+TSPLIB_FILES = sorted(glob.glob(os.path.join(ROOT, "data", "tsplib", "*.tsp")))
 SCALING_SIZES = (200, 500, 1000)
 SCALING_ALGORITHMS = ["2-opt", "2-opt+or-opt", "iterated_local_search"]
 
@@ -148,31 +146,43 @@ def plot_tour_comparison(results, n=50):
     save(fig, f"tour_comparison_{n}.png")
 
 
-def plot_gap_by_size(results):
-    """Small multiples: % above the best result, one panel per instance size."""
-    fig, axes = plt.subplots(1, len(SIZES), figsize=(12, 3.8), sharey=True)
+def gap_panels(panels, title, xlabel, zero_label, filename, panel_width):
+    """
+    Small multiples of horizontal bars, one panel per (panel title, gaps)
+    pair; gaps are % values per algorithm in ALGORITHMS order.
+    """
+    fig, axes = plt.subplots(1, len(panels), figsize=(panel_width * len(panels), 3.9),
+                             sharey=True)
     order = list(reversed(ALGORITHMS))
-    max_gap = max(results[n]["algos"][a]["gap"] for n in SIZES for a in ALGORITHMS)
-    for ax, n in zip(axes, SIZES):
-        gaps = [results[n]["algos"][a]["gap"] for a in order]
-        ax.barh(range(len(order)), gaps, height=0.6, color=SERIES)
-        for y, g in enumerate(gaps):
-            text = "best" if g < 0.005 else f"+{g:.1f}%"
+    max_gap = max(max(gaps.values()) for _, gaps in panels)
+    for ax, (panel_title, gaps) in zip(axes, panels):
+        values = [gaps[a] for a in order]
+        ax.barh(range(len(order)), values, height=0.6, color=SERIES)
+        for y, g in enumerate(values):
+            text = zero_label if g < 0.005 else f"+{g:.1f}%"
             ax.text(g + max_gap * 0.02, y, text, va="center",
                     color=INK_SECONDARY, fontsize=9)
         ax.set_yticks(range(len(order)))
         ax.set_yticklabels([LABELS[a] for a in order], color=INK_SECONDARY)
-        ax.set_xlim(0, max_gap * 1.25)
-        ax.set_title(f"{n} cities", loc="left", fontsize=11, fontweight="bold")
+        ax.set_xlim(0, max_gap * 1.3)
+        ax.set_title(panel_title, loc="left", fontsize=11, fontweight="bold")
         ax.xaxis.grid(True, color=GRID, linewidth=0.8)
         ax.set_axisbelow(True)
         ax.tick_params(axis="y", length=0)
         ax.spines["left"].set_color(BASELINE)
-        ax.set_xlabel("% above best result (lower is better)")
-    fig.suptitle("Solution quality by instance size", x=0.02, ha="left",
-                 fontsize=13, fontweight="bold")
+        ax.set_xlabel(xlabel)
+    fig.suptitle(title, x=0.02, ha="left", fontsize=13, fontweight="bold")
     fig.tight_layout()
-    save(fig, "quality_by_size.png")
+    save(fig, filename)
+
+
+def plot_gap_by_size(results):
+    """% above the best result, one panel per instance size."""
+    panels = [(f"{n} cities", {a: results[n]["algos"][a]["gap"] for a in ALGORITHMS})
+              for n in SIZES]
+    gap_panels(panels, "Solution quality by instance size",
+               "% above best result (lower is better)", "best",
+               "quality_by_size.png", panel_width=4)
 
 
 def plot_quality_vs_time(results, n=100):
@@ -277,33 +287,14 @@ def run_tsplib():
 
 
 def plot_tsplib_gap(df):
-    """Small multiples: % above the known optimum, one panel per instance."""
-    instances = list(dict.fromkeys(df["Instance"]))
-    fig, axes = plt.subplots(1, len(instances), figsize=(15, 4), sharey=True)
-    order = list(reversed(ALGORITHMS))
-    max_gap = df["Gap (%)"].max()
-    for ax, name in zip(axes, instances):
+    """% above the known optimum, one panel per TSPLIB instance."""
+    panels = []
+    for name in dict.fromkeys(df["Instance"]):
         sub = df[df["Instance"] == name].set_index("Algorithm")
-        gaps = [sub.loc[a, "Gap (%)"] for a in order]
-        ax.barh(range(len(order)), gaps, height=0.6, color=SERIES)
-        for y, g in enumerate(gaps):
-            text = "optimal" if g < 0.005 else f"+{g:.1f}%"
-            ax.text(g + max_gap * 0.02, y, text, va="center",
-                    color=INK_SECONDARY, fontsize=9)
-        ax.set_yticks(range(len(order)))
-        ax.set_yticklabels([LABELS[a] for a in order], color=INK_SECONDARY)
-        ax.set_xlim(0, max_gap * 1.3)
-        ax.set_title(f"{name} (optimum {int(sub['Optimum'].iloc[0])})",
-                     loc="left", fontsize=11, fontweight="bold")
-        ax.xaxis.grid(True, color=GRID, linewidth=0.8)
-        ax.set_axisbelow(True)
-        ax.tick_params(axis="y", length=0)
-        ax.spines["left"].set_color(BASELINE)
-        ax.set_xlabel("% above optimum")
-    fig.suptitle("TSPLIB instances: gap to the published optimal tour",
-                 x=0.02, ha="left", fontsize=13, fontweight="bold")
-    fig.tight_layout()
-    save(fig, "tsplib_gap.png")
+        panels.append((f"{name} (optimum {int(sub['Optimum'].iloc[0])})",
+                       {a: sub.loc[a, "Gap (%)"] for a in ALGORITHMS}))
+    gap_panels(panels, "TSPLIB instances: gap to the published optimal tour",
+               "% above optimum", "optimal", "tsplib_gap.png", panel_width=3.75)
 
 
 def print_tsplib_table(df):
