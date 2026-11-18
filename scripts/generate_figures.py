@@ -6,7 +6,7 @@ Usage (from the repository root, after `pip install -e ".[dev]"`):
 
 Writes PNGs to images/ and prints the README results tables as Markdown.
 Distances are deterministic (fixed instance and solver seeds); times depend
-on the machine.
+on the machine. Takes a few minutes.
 """
 
 import glob
@@ -20,7 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from tsp_solver import (TSPBenchmark, TSPSolver,  # noqa: E402
-                        generate_random_cities)
+                        generate_random_cities, load_tsplib)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,8 +43,13 @@ LABELS = {
     "genetic_algorithm": "Genetic Algorithm",
 }
 TSPLIB_FILES = sorted(glob.glob(os.path.join(ROOT, "data", "tsplib", "*.tsp")))
-SCALING_SIZES = (200, 500, 1000)
-SCALING_ALGORITHMS = ["2-opt", "2-opt+or-opt", "iterated_local_search"]
+SCALING_SIZES = (200, 500, 1000, 2000)
+# Everything but 3-Opt, whose O(n^3) passes take minutes at these sizes.
+SCALING_ALGORITHMS = [a for a in ALGORITHMS if a != "3-opt"]
+SCATTER_SIZE = 1000
+# The algorithms whose result depends on the seed, and the seeds tried.
+RANDOMIZED = ["iterated_local_search", "simulated_annealing", "genetic_algorithm"]
+RELIABILITY_SEEDS = range(20)
 
 # Chart chrome (light surface) and series color
 SURFACE = "#fcfcfb"
@@ -185,12 +190,25 @@ def plot_gap_by_size(results):
                "quality_by_size.png", panel_width=4)
 
 
-def plot_quality_vs_time(results, n=100):
-    """Scatter: runtime vs. gap to best on the largest instance."""
-    data = results[n]["algos"]
+def run_scaling():
+    """Solve larger random instances with the algorithms that scale."""
+    scaling = {}
+    for n in SCALING_SIZES:
+        runs = TSPSolver(generate_random_cities(n), seed=SEED) \
+            .compare_algorithms(SCALING_ALGORITHMS)
+        best = min(r["distance"] for r in runs.values())
+        scaling[n] = {a: {"distance": r["distance"], "time": r["time"],
+                          "gap": 100 * (r["distance"] - best) / best}
+                      for a, r in runs.items()}
+    return scaling
+
+
+def plot_quality_vs_time(scaling, n=SCATTER_SIZE):
+    """Scatter: runtime vs. gap to best on a large instance."""
+    data = scaling[n]
     fig, ax = plt.subplots(figsize=(8, 5))
-    xs = [data[a]["time"] for a in ALGORITHMS]
-    ys = [data[a]["gap"] for a in ALGORITHMS]
+    xs = [data[a]["time"] for a in SCALING_ALGORITHMS]
+    ys = [data[a]["gap"] for a in SCALING_ALGORITHMS]
     ax.scatter(xs, ys, s=64, color=SERIES, edgecolor=SURFACE, linewidth=2,
                zorder=3)
     ax.set_xscale("log")
@@ -205,7 +223,7 @@ def plot_quality_vs_time(results, n=100):
     ax.set_title(f"Quality vs. runtime, {n} cities (lower left is better)",
                  loc="left", fontsize=13, fontweight="bold")
     fig.tight_layout()
-    place_labels(ax, xs, ys, [LABELS[a] for a in ALGORITHMS])
+    place_labels(ax, xs, ys, [LABELS[a] for a in SCALING_ALGORITHMS])
     save(fig, f"quality_vs_time_{n}.png")
 
 
@@ -314,17 +332,54 @@ def print_tsplib_table(df):
         print(f"| {LABELS[a]} | " + " | ".join(cells) + " |")
 
 
-def print_scaling_table():
-    """Runtime and length of the local searches on larger random instances."""
+def format_time(seconds):
+    """'0.9 ms', '13 ms', '0.51 s', '4.5 s', '13 s'."""
+    if seconds < 0.00995:
+        return f"{1000 * seconds:.1f} ms"
+    if seconds < 0.0995:
+        return f"{1000 * seconds:.0f} ms"
+    if seconds < 0.995:
+        return f"{seconds:.2f} s"
+    if seconds < 9.95:
+        return f"{seconds:.1f} s"
+    return f"{seconds:.0f} s"
+
+
+def print_scaling_table(scaling):
+    """Tour length (runtime) on the larger random instances."""
     print("\n| Algorithm | " + " | ".join(f"{n} cities" for n in SCALING_SIZES) + " |")
     print("|-----------|" + "-----------|" * len(SCALING_SIZES))
-    rows = {a: [] for a in SCALING_ALGORITHMS}
-    for n in SCALING_SIZES:
-        results = TSPSolver(generate_random_cities(n), seed=SEED) \
-            .compare_algorithms(SCALING_ALGORITHMS)
-        for a in SCALING_ALGORITHMS:
-            rows[a].append(f"{results[a]['distance']:.1f} ({results[a]['time']:.2f} s)")
     for a in SCALING_ALGORITHMS:
+        cells = []
+        for n in SCALING_SIZES:
+            info = scaling[n][a]
+            length = f"{info['distance']:.1f}"
+            if info["gap"] < 0.005:
+                length = f"**{length}**"
+            cells.append(f"{length} ({format_time(info['time'])})")
+        print(f"| {LABELS[a]} | " + " | ".join(cells) + " |")
+
+
+def print_reliability_table():
+    """How often each randomized algorithm reaches the published optimum of
+    the TSPLIB instances, over RELIABILITY_SEEDS, and its mean gap."""
+    instances = sorted((load_tsplib(path) for path in TSPLIB_FILES),
+                       key=lambda instance: instance["dimension"])
+    print("\n| Algorithm | " + " | ".join(instance["name"] for instance in instances) + " |")
+    print("|-----------|" + "-----------|" * len(instances))
+    rows = {a: [] for a in RANDOMIZED}
+    for instance in instances:
+        optimum = instance["optimum"]
+        lengths = {a: [] for a in RANDOMIZED}
+        for seed in RELIABILITY_SEEDS:
+            runs = TSPSolver.from_tsplib(instance, seed=seed).compare_algorithms(RANDOMIZED)
+            for a in RANDOMIZED:
+                lengths[a].append(runs[a]["distance"])
+        for a in RANDOMIZED:
+            hits = sum(length <= optimum for length in lengths[a])
+            gap = 100 * (sum(lengths[a]) / len(lengths[a]) - optimum) / optimum
+            rows[a].append(f"{hits}/{len(lengths[a])} (+{gap:.2f}%)")
+    for a in RANDOMIZED:
         print(f"| {LABELS[a]} | " + " | ".join(rows[a]) + " |")
 
 
@@ -342,12 +397,14 @@ def main():
     plot_best_tour(results)
     plot_tour_comparison(results)
     plot_gap_by_size(results)
-    plot_quality_vs_time(results)
     tsplib = run_tsplib()
     plot_tsplib_gap(tsplib)
+    scaling = run_scaling()
+    plot_quality_vs_time(scaling)
     print_table(results)
     print_tsplib_table(tsplib)
-    print_scaling_table()
+    print_reliability_table()
+    print_scaling_table(scaling)
     print_exact_20()
 
 
