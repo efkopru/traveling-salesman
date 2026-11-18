@@ -153,10 +153,18 @@ class TSPSolver:
                    distance=instance['edge_weight_type'])
 
     def calculate_tour_distance(self, tour: List[int]) -> float:
-        """Calculate total distance of a tour (returning to its first city)."""
+        """
+        Calculate total distance of a tour (returning to its first city).
+
+        The edges are added exactly and rounded once (math.fsum), so the
+        result does not depend on where the tour starts, on its direction
+        or on the Python version (sum() only compensates for rounding from
+        3.12 on). The genetic algorithm needs that: it ranks tours by this
+        number, and copies of one tour must not be ordered by rounding noise.
+        """
         D = self._dist
         tour = list(tour)
-        return sum(D[a][b] for a, b in zip(tour, tour[1:] + tour[:1]))
+        return math.fsum(D[a][b] for a, b in zip(tour, tour[1:] + tour[:1]))
 
     def _check_city(self, city: int, name: str = 'start_city') -> int:
         """Return `city` as an int index, or raise if it is not a city."""

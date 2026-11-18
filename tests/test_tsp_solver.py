@@ -667,6 +667,16 @@ def test_results_do_not_depend_on_the_scale_of_the_coordinates(scale):
             getattr(TSPSolver(cities, seed=1), method)(**kwargs)[0]
 
 
+def test_tour_length_does_not_depend_on_start_or_direction():
+    # Added edge by edge with sum(), the rotations of one tour differed in
+    # the last bit before Python 3.12. The genetic algorithm ranks tours by
+    # length, so its result then changed with the scale of the coordinates.
+    solver = TSPSolver(generate_random_cities(60, seed=3))
+    tour = solver.nearest_neighbor()[0]
+    variants = [tour[i:] + tour[:i] for i in range(len(tour))] + [tour[::-1]]
+    assert len({solver.calculate_tour_distance(t) for t in variants}) == 1
+
+
 def test_tolerance_scales_with_the_distances():
     cities = generate_random_cities(10, seed=1)
     small, large = TSPSolver(cities), TSPSolver(cities * 1e6)
