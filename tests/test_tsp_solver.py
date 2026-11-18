@@ -1,12 +1,17 @@
+import itertools
 import os
 import pathlib
 import random
+import threading
+import time
 
 import numpy as np
 import pytest
 
+import tsp_solver.solver as solver_module
 from tsp_solver import (TSPLIB_OPTIMA, TSPBenchmark, TSPSolver,
                         generate_random_cities, load_tsplib)
+from tsp_solver.solver import _TourSearch
 
 HEURISTICS = ["nearest_neighbor", "nearest_insertion", "two_opt", "three_opt",
               "or_opt", "local_search", "iterated_local_search",
@@ -120,7 +125,7 @@ def test_two_opt_max_iterations_counts_passes():
 
 
 @pytest.mark.parametrize("method", ["two_opt", "or_opt", "local_search",
-                                    "iterated_local_search"])
+                                    "three_opt", "iterated_local_search"])
 def test_local_search_keeps_first_city(method):
     solver = TSPSolver(generate_random_cities(40, seed=12), seed=0)
     start, _ = solver.nearest_neighbor(start_city=7)
@@ -312,6 +317,7 @@ def test_compare_algorithms_skips_held_karp_above_limit():
 
 
 TSPLIB_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "tsplib")
+BUNDLED = ["eil51", "berlin52", "st70", "kroA100"]
 
 
 @pytest.mark.parametrize("name, dimension", [("eil51", 51), ("berlin52", 52),
@@ -473,22 +479,431 @@ def test_invalid_initial_tours_are_rejected(tour):
         solver.two_opt(tour)
 
 
-def test_double_bridge_reports_exactly_the_changed_endpoints():
-    solver = TSPSolver(generate_random_cities(30, seed=2), seed=5)
-    tour = list(range(30))
-
-    def edges(t):
-        return {frozenset((t[i], t[(i + 1) % len(t)])) for i in range(len(t))}
-
-    for _ in range(50):
-        new, touched = solver._double_bridge(tour)
-        changed = edges(tour) ^ edges(new)
-        assert set(touched) == {city for edge in changed for city in edge}
-
-
 def test_exceeds_size_limit():
     small = TSPSolver(generate_random_cities(10))
     large = TSPSolver(generate_random_cities(21))
     assert not small.exceeds_size_limit("brute_force")
     assert large.exceeds_size_limit("held_karp")
     assert not large.exceeds_size_limit("2-opt")
+
+
+# ---- tour representation and moves (_TourSearch) ----
+
+def edge_set(tour):
+    return {frozenset((tour[i], tour[(i + 1) % len(tour)])) for i in range(len(tour))}
+
+
+@pytest.mark.parametrize("n", [8, 9, 13, 40, 200])
+def test_double_bridge_changes_four_edges_and_reports_them(n):
+    solver = TSPSolver(generate_random_cities(n, seed=n))
+    rng = random.Random(n)
+    max_piece = min(50, (n - 2) // 3)
+    four_edge_kicks = 0
+    for _ in range(60):
+        tour = rng.sample(range(n), n)
+        before = list(tour)
+        search = _TourSearch(solver, tour)
+        change, touched = search.double_bridge(rng, max_piece)
+        assert sorted(tour) == list(range(n))
+        assert all(search.pos[city] == i for i, city in enumerate(tour))
+        removed = edge_set(before) - edge_set(tour)
+        # Fewer than four only when pieces of one city put an old edge back.
+        assert len(removed) <= 4
+        four_edge_kicks += len(removed) == 4
+        changed = edge_set(before) ^ edge_set(tour)
+        assert {city for edge in changed for city in edge} <= set(touched)
+        assert change == pytest.approx(solver.calculate_tour_distance(tour)
+                                       - solver.calculate_tour_distance(before), abs=1e-9)
+    assert four_edge_kicks > 20
+
+
+@pytest.mark.parametrize("n", [5, 6, 7, 12, 60])
+@pytest.mark.parametrize("prune", [False, True])
+def test_tour_search_reports_the_exact_change(n, prune):
+    solver = TSPSolver(generate_random_cities(n, seed=n))
+    rng = random.Random(n)
+    for _ in range(10):
+        tour = rng.sample(range(n), n)
+        before = solver.calculate_tour_distance(tour)
+        search = _TourSearch(solver, tour)
+        change = search.optimize(solver._neighbor_lists(), solver._neighbor_lists(10),
+                                 until_optimal=True, prune=prune)
+        assert sorted(tour) == list(range(n))
+        assert all(search.pos[city] == i for i, city in enumerate(tour))
+        assert not any(search.queued)
+        assert change <= 0
+        assert solver.calculate_tour_distance(tour) - before == pytest.approx(change, abs=1e-9)
+
+
+def improving_or_opt_move_exists(solver, tour, neighbors=10, max_segment=3):
+    """Every segment of up to max_segment cities, moved in either
+    orientation into a tour edge at one of the nearest neighbors of its
+    end cities."""
+    D = solver.distance_matrix
+    near = solver._neighbor_lists(neighbors)
+    n = len(tour)
+    pos = {city: i for i, city in enumerate(tour)}
+    for length in range(1, max_segment + 1):
+        if n < length + 3:
+            break
+        for i in range(n):
+            s, e = tour[i], tour[(i + length - 1) % n]
+            p, nx = tour[(i - 1) % n], tour[(i + length) % n]
+            removal_gain = D[p, s] + D[e, nx] - D[p, nx]
+            for x in (s, e):
+                for c in near[x]:
+                    if (pos[c] - i) % n < length:
+                        continue
+                    for u, v in ((c, tour[(pos[c] + 1) % n]), (tour[(pos[c] - 1) % n], c)):
+                        if (pos[u] - i) % n < length or (pos[v] - i) % n < length:
+                            continue
+                        cost = min(D[u, s] + D[e, v], D[u, e] + D[s, v]) - D[u, v]
+                        if removal_gain - cost > 1e-9:
+                            return True
+    return False
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_local_search_leaves_no_two_opt_or_or_opt_move(seed):
+    solver = TSPSolver(generate_random_cities(70, seed=seed))
+    start = list(range(70))
+    random.Random(seed).shuffle(start)
+    tour, distance = solver.local_search(start)
+    assert not improving_two_opt_move_exists(solver, tour)
+    assert not improving_or_opt_move_exists(solver, tour)
+    assert distance <= solver.two_opt(start)[1] + 1e-9
+    relocated, _ = solver.or_opt(start)
+    assert not improving_or_opt_move_exists(solver, relocated)
+
+
+def best_three_opt_gain(solver, tour):
+    """Largest gain of any of the seven reconnections of any three edges."""
+    D = solver.distance_matrix
+    n = len(tour)
+    best = 0.0
+    for i, j, k in itertools.combinations(range(n), 3):
+        a, b = tour[i], tour[i + 1]
+        c, d = tour[j], tour[j + 1]
+        e, f = tour[k], tour[(k + 1) % n]
+        current = D[a, b] + D[c, d] + D[e, f]
+        best = max(best, current - min(
+            D[a, c] + D[b, d] + D[e, f], D[a, b] + D[c, e] + D[d, f],
+            D[a, e] + D[c, d] + D[b, f], D[a, d] + D[e, b] + D[c, f],
+            D[a, c] + D[b, e] + D[d, f], D[a, e] + D[d, b] + D[c, f],
+            D[a, d] + D[e, c] + D[b, f]))
+    return best
+
+
+@pytest.mark.parametrize("n, seed", [(4, 0), (5, 1), (6, 2), (9, 3), (30, 4), (30, 5), (45, 6)])
+def test_three_opt_is_locally_optimal(n, seed):
+    # Only four of the seven reconnections used to be tried, and never for
+    # neighboring edges: half the results could still be improved.
+    solver = TSPSolver(generate_random_cities(n, seed=seed))
+    start = list(range(n))
+    random.Random(seed).shuffle(start)
+    tour, distance = solver.three_opt(start)
+    assert_valid(solver, tour, distance)
+    assert tour[0] == start[0]
+    assert best_three_opt_gain(solver, tour) < 1e-9
+    assert not improving_two_opt_move_exists(solver, tour)
+
+
+# ---- numerical robustness ----
+
+def run_with_timeout(function, seconds):
+    """Return function(), or fail if it is still running after `seconds`."""
+    outcome = {}
+
+    def target():
+        try:
+            outcome["value"] = function()
+        except BaseException as error:  # reported in the calling thread
+            outcome["error"] = error
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), f"still running after {seconds} s"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+@pytest.mark.parametrize("method, side, starts", [
+    ("two_opt", 10, 60), ("or_opt", 10, 80), ("local_search", 10, 30),
+    ("three_opt", 7, 4), ("iterated_local_search", 10, 3)])
+def test_local_search_terminates_on_ties_with_large_coordinates(method, side, starts):
+    # A grid scaled like map coordinates in metres: equally long edges
+    # differ in their last bits. With a fixed tolerance of 1e-10 the search
+    # traded such tours back and forth forever.
+    n = side * side
+    grid = np.array([(i, j) for i in range(side) for j in range(side)], dtype=float)
+    solver = TSPSolver(grid * 1234567.891, seed=1)
+    unit = solver.distance_matrix[0, 1]
+    rng = random.Random(0)
+    kwargs = {"iterations": 100} if method == "iterated_local_search" else {}
+
+    def run_all():
+        return [getattr(solver, method)(rng.sample(range(n), n), **kwargs)
+                for _ in range(starts)]
+
+    for tour, distance in run_with_timeout(run_all, 120):
+        assert sorted(tour) == list(range(n))
+        assert distance / unit >= n - 1e-6        # a grid tour is at least n long
+
+
+@pytest.mark.parametrize("scale", [1e-9, 1e9])
+def test_results_do_not_depend_on_the_scale_of_the_coordinates(scale):
+    # With the old fixed tolerance, coordinates of the order of 1e-10 were
+    # not improved at all.
+    cities = generate_random_cities(40, seed=5)
+    for method in ("two_opt", "or_opt", "local_search", "three_opt"):
+        assert getattr(TSPSolver(cities * scale), method)()[0] == \
+            getattr(TSPSolver(cities), method)()[0]
+    for method, kwargs in (("iterated_local_search", {"iterations": 200}),
+                           ("simulated_annealing", {"max_iterations": 20000}),
+                           ("genetic_algorithm", {"generations": 5})):
+        assert getattr(TSPSolver(cities * scale, seed=1), method)(**kwargs)[0] == \
+            getattr(TSPSolver(cities, seed=1), method)(**kwargs)[0]
+
+
+def test_tour_length_does_not_depend_on_start_or_direction():
+    # Added edge by edge with sum(), the rotations of one tour differed in
+    # the last bit before Python 3.12. The genetic algorithm ranks tours by
+    # length, so its result then changed with the scale of the coordinates.
+    solver = TSPSolver(generate_random_cities(60, seed=3))
+    tour = solver.nearest_neighbor()[0]
+    variants = [tour[i:] + tour[:i] for i in range(len(tour))] + [tour[::-1]]
+    assert len({solver.calculate_tour_distance(t) for t in variants}) == 1
+
+
+def test_tolerance_scales_with_the_distances():
+    cities = generate_random_cities(10, seed=1)
+    small, large = TSPSolver(cities), TSPSolver(cities * 1e6)
+    assert 0 < small.tolerance < 1e-9
+    assert large.tolerance == pytest.approx(1e6 * small.tolerance)
+    assert TSPSolver(np.ones((5, 2))).tolerance == 0
+
+
+@pytest.mark.parametrize("coordinate", [float("nan"), float("inf"), -float("inf")])
+def test_non_finite_coordinates_are_rejected(coordinate):
+    with pytest.raises(ValueError, match="finite"):
+        TSPSolver([(0, 0), (1, coordinate), (2, 2)])
+
+
+def test_overflowing_distances_are_rejected():
+    with pytest.raises(ValueError, match="too large"):
+        TSPSolver([(0, 0), (1e200, 1e200)])
+
+
+@pytest.mark.parametrize("start_city", [-1, 6, 1.5, "0", None, True])
+def test_start_city_is_validated(start_city):
+    # -1 used to give brute force a tour with seven entries for six cities.
+    solver = TSPSolver(generate_random_cities(6))
+    for method in (solver.brute_force, solver.nearest_neighbor):
+        with pytest.raises(ValueError, match="start_city"):
+            method(start_city)
+
+
+def test_start_city_accepts_numpy_integers():
+    solver = TSPSolver(generate_random_cities(6))
+    assert solver.nearest_neighbor(np.int64(4)) == solver.nearest_neighbor(4)
+    assert solver.brute_force(np.int32(2))[0][0] == 2
+
+
+def test_city_names_may_be_any_sequence():
+    names = np.array(["a", "b", "c"])
+    assert TSPSolver(generate_random_cities(3), city_names=names).city_names == ["a", "b", "c"]
+    assert TSPSolver(generate_random_cities(2), city_names=(7, 8)).city_names == ["7", "8"]
+
+
+# ---- constructive heuristics ----
+
+@pytest.mark.parametrize("cities", [
+    generate_random_cities(200, seed=3),
+    np.vstack([generate_random_cities(60, seed=4)] * 3),             # duplicates
+    np.array([(i, j) for i in range(14) for j in range(14)]),        # ties
+    generate_random_cities(3, seed=1),
+])
+def test_vectorized_construction_matches_the_python_loops(cities, monkeypatch):
+    solver = TSPSolver(cities)
+    last = len(cities) - 1
+    monkeypatch.setattr(solver_module, "_NUMPY_ROW_THRESHOLD", 10 ** 9)
+    plain = [solver.nearest_neighbor(0), solver.nearest_neighbor(last),
+             solver.nearest_insertion()]
+    monkeypatch.setattr(solver_module, "_NUMPY_ROW_THRESHOLD", 0)
+    assert [solver.nearest_neighbor(0), solver.nearest_neighbor(last),
+            solver.nearest_insertion()] == plain
+
+
+def test_nearest_insertion_starts_with_the_closest_pair():
+    solver = TSPSolver([(0, 0), (10, 0), (10, 1), (0, 9), (5, 5)])
+    tour, distance = solver.nearest_insertion()
+    assert_valid(solver, tour, distance)
+    assert tour[0] == 1                   # cities 1 and 2 are the closest pair
+    # Of two equally close pairs, the one with the lower indices starts.
+    tied = TSPSolver([(0, 0), (5, 5), (0, 1), (9, 9), (9, 8)])
+    assert tied.nearest_insertion()[0][0] == 0
+
+
+# ---- iterated local search ----
+
+@pytest.mark.parametrize("name", BUNDLED)
+def test_iterated_local_search_reaches_the_optimum_on_bundled_instances(name):
+    solver = TSPSolver.from_tsplib(os.path.join(TSPLIB_DIR, f"{name}.tsp"), seed=42)
+    tour, distance = solver.iterated_local_search()
+    assert_valid(solver, tour, distance)
+    assert distance == TSPLIB_OPTIMA[name]
+
+
+def test_iterated_local_search_budgets():
+    solver = TSPSolver(generate_random_cities(60, seed=2), seed=2)
+    _, local = solver.local_search()
+    # No kicks: the local search alone.
+    assert solver.iterated_local_search(iterations=0)[1] == pytest.approx(local)
+    assert solver.iterated_local_search(time_limit=0)[1] == pytest.approx(local)
+    started = time.perf_counter()
+    tour, distance = solver.iterated_local_search(time_limit=0.2)
+    assert time.perf_counter() - started < 10
+    assert_valid(solver, tour, distance)
+    assert distance <= local + 1e-9
+    # Whichever budget runs out first ends the search.
+    tour, distance = solver.iterated_local_search(iterations=20, time_limit=60)
+    assert_valid(solver, tour, distance)
+
+
+@pytest.mark.parametrize("kwargs", [{"iterations": -1}, {"time_limit": -0.5}])
+def test_iterated_local_search_rejects_negative_budgets(kwargs):
+    solver = TSPSolver(generate_random_cities(20, seed=1), seed=1)
+    with pytest.raises(ValueError):
+        solver.iterated_local_search(**kwargs)
+
+
+@pytest.mark.parametrize("neighbors", [None, 3])
+def test_iterated_local_search_neighbor_options(neighbors):
+    solver = TSPSolver(generate_random_cities(50, seed=6), seed=6)
+    start, start_distance = solver.nearest_neighbor(9)
+    tour, distance = solver.iterated_local_search(start, iterations=100, neighbors=neighbors)
+    assert_valid(solver, tour, distance)
+    assert tour[0] == 9
+    assert distance <= solver.local_search(start)[1] + 1e-9
+
+
+# ---- genetic algorithm ----
+
+@pytest.mark.parametrize("kwargs", [{"population_size": 0}, {"generations": -1},
+                                    {"mutation_rate": 1.5}, {"mutation_rate": -0.1},
+                                    {"elite_size": -1}])
+def test_genetic_algorithm_rejects_invalid_parameters(kwargs):
+    solver = TSPSolver(generate_random_cities(12, seed=1), seed=1)
+    with pytest.raises(ValueError, match=next(iter(kwargs))):
+        solver.genetic_algorithm(**kwargs)
+
+
+@pytest.mark.parametrize("kwargs", [{"population_size": 1}, {"population_size": 2, "elite_size": 0},
+                                    {"generations": 0}, {"population_size": 5, "elite_size": 9},
+                                    {"population_size": 40}, {"mutation_rate": 1.0},
+                                    {"mutation_rate": 0.0}, {"neighbors": None}])
+def test_genetic_algorithm_parameter_ranges(kwargs):
+    solver = TSPSolver(generate_random_cities(12, seed=1), seed=1)
+    kwargs = {"generations": 5, **kwargs}
+    tour, distance = solver.genetic_algorithm(**kwargs)
+    assert_valid(solver, tour, distance)
+    assert distance >= solver.held_karp()[1] - 1e-9
+
+
+def test_genetic_algorithm_reaches_the_optimum_on_eil51():
+    solver = TSPSolver.from_tsplib(os.path.join(TSPLIB_DIR, "eil51.tsp"), seed=42)
+    tour, distance = solver.genetic_algorithm()
+    assert_valid(solver, tour, distance)
+    assert distance == TSPLIB_OPTIMA["eil51"]
+
+
+def test_genetic_algorithm_result_is_locally_optimal():
+    solver = TSPSolver(generate_random_cities(60, seed=3), seed=3)
+    tour, _ = solver.genetic_algorithm(generations=3)
+    assert not improving_two_opt_move_exists(solver, tour)
+    assert not improving_or_opt_move_exists(solver, tour)
+
+
+# ---- comparison and plotting ----
+
+def test_compare_algorithms_passes_options():
+    solver = TSPSolver(generate_random_cities(40, seed=3), seed=3)
+    results = solver.compare_algorithms(
+        ["2-opt", "iterated_local_search", "nearest_neighbor"],
+        options={"2-opt": {"max_iterations": 0},
+                 "iterated_local_search": {"iterations": 0}})
+    assert results["2-opt"]["tour"] == results["nearest_neighbor"]["tour"]
+    assert results["iterated_local_search"]["distance"] == pytest.approx(solver.local_search()[1])
+    with pytest.raises(ValueError, match="no_such"):
+        solver.compare_algorithms(["2-opt"], options={"no_such": {}})
+
+
+def test_visualize_tour_labels_small_instances_only():
+    import matplotlib.pyplot as plt
+
+    small = TSPSolver(generate_random_cities(12))
+    large = TSPSolver(generate_random_cities(80))
+    for solver, labels, expected in ((small, None, 12), (large, None, 0),
+                                     (large, True, 80), (small, False, 0)):
+        fig = solver.visualize_tour(solver.nearest_neighbor()[0], show=False, labels=labels)
+        assert len(fig.axes[0].texts) == expected
+        plt.close(fig)
+    with pytest.raises(ValueError, match="empty"):
+        small.visualize_tour([], show=False)
+
+
+# ---- TSPLIB reader ----
+
+def test_tsplib_reader_tolerates_format_variations(tmp_path):
+    path = tmp_path / "variations.tsp"
+    path.write_bytes(b"name : tiny\ncomment : caf\xe9 tour\nTYPE :\ndimension : 3\n"
+                     b"edge_weight_type : euc_2d\nnode_coord_section\n"
+                     b"1.0 0 0\n2.0 3e0 0\n3.0 3 4\neof\nthis line is not read\n")
+    instance = load_tsplib(path)
+    assert instance["dimension"] == 3
+    assert instance["city_names"] == ["1.0", "2.0", "3.0"]
+    assert instance["edge_weight_type"] == "EUC_2D"
+    assert instance["coordinates"].tolist() == [[0, 0], [3, 0], [3, 4]]
+    assert TSPSolver.from_tsplib(instance).held_karp()[1] == 12
+
+
+def test_tsplib_reader_finds_the_optimum_when_the_name_has_an_extension(tmp_path):
+    text = open(os.path.join(TSPLIB_DIR, "eil51.tsp")).read()
+    assert "eil51" in text.splitlines()[0]
+    path = tmp_path / "renamed.tsp"
+    path.write_text(text.replace("eil51", "eil51.tsp", 1))
+    assert load_tsplib(path)["optimum"] == 426
+
+
+def test_optima_are_known_for_instances_that_are_not_bundled(tmp_path):
+    assert set(BUNDLED) <= set(TSPLIB_OPTIMA)
+    assert all(isinstance(value, int) and value > 0 for value in TSPLIB_OPTIMA.values())
+    path = tmp_path / "pr1002.tsp"
+    path.write_text("NAME : pr1002\nTYPE : TSP\nDIMENSION : 3\nEDGE_WEIGHT_TYPE : EUC_2D\n"
+                    "NODE_COORD_SECTION\n1 0 0\n2 3 0\n3 3 4\nEOF\n")
+    assert load_tsplib(path)["optimum"] == 259045
+    path.write_text(path.read_text().replace("pr1002", "my_cities"))
+    assert load_tsplib(path)["optimum"] is None
+
+
+def test_tsplib_reader_works_without_dimension(tmp_path):
+    path = tmp_path / "nodim.tsp"
+    path.write_text("NAME: nodim\nTYPE: TSP\nEDGE_WEIGHT_TYPE: EUC_2D\n"
+                    "NODE_COORD_SECTION\n1 0 0\n2 5 0\n")
+    assert load_tsplib(path)["dimension"] == 2
+
+
+@pytest.mark.parametrize("body, message", [
+    ("DIMENSION: 2\nNODE_COORD_SECTION\n1 0 0\n2 1 one\nEOF\n", "line 7"),
+    ("DIMENSION: 2\nNODE_COORD_SECTION\n1 0 0\n2 1\nEOF\n", "line 7"),
+    ("DIMENSION: 2\nNODE_COORD_SECTION\nEOF\n", "no node coordinates"),
+    ("DIMENSION: two\nNODE_COORD_SECTION\n1 0 0\n2 1 1\nEOF\n", "DIMENSION must be an integer"),
+    ("DIMENSION: 3\nNODE_COORD_SECTION\n1 0 0\n2 1 1\nEOF\n", "DIMENSION is 3"),
+])
+def test_tsplib_reader_reports_malformed_files(tmp_path, body, message):
+    path = tmp_path / "bad.tsp"
+    path.write_text("NAME: bad\nTYPE: TSP\nEDGE_WEIGHT_TYPE: EUC_2D\n" + body)
+    with pytest.raises(ValueError, match=message):
+        load_tsplib(path)

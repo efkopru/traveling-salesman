@@ -12,21 +12,25 @@ A Python implementation of exact, constructive, local-search and metaheuristic a
 | Algorithm | Type | Time Complexity | Strengths |
 |-----------|------|----------------|-----------|
 | **Brute Force** | Exact | O(n!) | Guaranteed optimum; feasible for n ≤ 10 |
-| **Held-Karp** | Exact (dynamic programming) | O(n²·2ⁿ) | Guaranteed optimum up to 20 cities (≈1.7 s) |
+| **Held-Karp** | Exact (dynamic programming) | O(n²·2ⁿ) | Guaranteed optimum up to 20 cities (≈1 s) |
 | **Nearest Neighbor** | Greedy | O(n²) | Very fast, simple |
 | **Nearest Insertion** | Constructive | O(n²) | Fast, similar quality to Nearest Neighbor |
-| **2-Opt** | Local Search | O(n²) per pass, usually far less | Large improvement in milliseconds; 1000 cities in under a second |
-| **3-Opt** | Local Search | O(n³) per pass | Escapes some 2-opt local optima |
+| **2-Opt** | Local Search | O(n²) per pass, usually far less | Large improvement in milliseconds; 2000 cities in 0.1 s |
+| **3-Opt** | Local Search | O(n³) per pass | True 3-opt local optimum; practical up to about 150 cities |
 | **Or-Opt** | Local Search | O(n·k) per pass | Moves segments of 1–3 cities |
-| **2-Opt + Or-Opt** | Local Search | — | Both, alternated until neither improves |
-| **Iterated Local Search** | Metaheuristic | O(iterations · n) | Double-bridge kicks + 2-opt; best quality per second |
+| **2-Opt + Or-Opt** | Local Search | — | 2-opt, then both until neither improves; never worse than 2-Opt |
+| **Iterated Local Search** | Metaheuristic | O(iterations) | Local double-bridge kicks repaired by 2-opt and Or-opt; best quality per second |
 | **Simulated Annealing** | Metaheuristic | O(iterations) | Escapes local optima; temperatures calibrated on its own moves |
-| **Genetic Algorithm** | Memetic (GA + 2-opt) | O(gen · pop · local search) | Best result, or within 1% of it, on every benchmark below |
+| **Genetic Algorithm** | Memetic (GA + local search) | O(gen · pop · local search) | Matches Iterated Local Search up to about 1000 cities, at several times the runtime |
 
 How the local search stays fast:
 - Every move is evaluated in O(1) from the distance matrix, without recomputing the tour.
 - 2-Opt scans each city's partners in order of distance and stops as soon as no improving move is possible. Only the few nearest partners are sorted up front; the rest of a list is sorted if a scan ever reaches it.
-- "Don't-look bits" skip cities whose surroundings have not changed; a final sweep over all cities confirms that no improving move is left, so the default 2-Opt result is a true 2-opt local optimum.
+- "Don't-look bits" skip cities whose surroundings have not changed; a final sweep over all cities confirms that no improving move is left, so the default 2-Opt and 2-Opt + Or-Opt results are true local optima.
+- The tour is an array with a position index, and a move reverses whichever side of the tour is shorter.
+- Iterated Local Search kicks a short stretch of the tour and repairs only around it, so beyond a few hundred cities the cost of a kick no longer grows with the instance.
+
+Improvements are judged relative to the largest distance of the instance, so the same cities in metres or in kilometres give the same tour, whatever the magnitude of the coordinates.
 
 ## Performance Results
 
@@ -36,18 +40,16 @@ Random uniform instances in a 100×100 square, `generate_random_cities(n)` with 
 
 | Algorithm | 20 cities | 50 cities | 100 cities | Time at 100 cities (s) |
 |-----------|-----------|-----------|------------|------------------------|
-| Nearest Neighbor | 465.04 (+20.3%) | 694.76 (+24.1%) | 1006.40 (+35.0%) | 0.0004 |
-| Nearest Insertion | 462.66 (+19.7%) | 699.63 (+25.0%) | 942.29 (+26.4%) | 0.0012 |
-| 2-Opt | 386.63 (+0.1%) | **559.86** | 812.63 (+9.0%) | 0.0019 |
-| 3-Opt | 386.63 (+0.1%) | 568.11 (+1.5%) | 767.35 (+2.9%) | 0.16 |
-| 2-Opt + Or-Opt | 386.63 (+0.1%) | **559.86** | 777.00 (+4.2%) | 0.012 |
-| Iterated Local Search | **386.43** | **559.86** | **745.73** | 0.14 |
-| Simulated Annealing | **386.43** | **559.86** | 751.40 (+0.8%) | 0.13 |
-| Genetic Algorithm | **386.43** | **559.86** | **745.73** | 0.35 |
+| Nearest Neighbor | 465.04 (+20.3%) | 694.76 (+24.1%) | 1006.40 (+35.0%) | 0.0001 |
+| Nearest Insertion | 462.66 (+19.7%) | 699.63 (+25.0%) | 942.29 (+26.4%) | 0.0008 |
+| 2-Opt | 386.63 (+0.1%) | **559.86** | 812.63 (+9.0%) | 0.0010 |
+| 3-Opt | 386.63 (+0.1%) | 563.02 (+0.6%) | 749.82 (+0.5%) | 0.17 |
+| 2-Opt + Or-Opt | 386.63 (+0.1%) | **559.86** | 759.67 (+1.9%) | 0.0040 |
+| Iterated Local Search | **386.43** | **559.86** | **745.73** | 0.19 |
+| Simulated Annealing | **386.43** | 571.66 (+2.1%) | 746.57 (+0.1%) | 0.11 |
+| Genetic Algorithm | **386.43** | **559.86** | **745.73** | 0.62 |
 
 ![Solution quality by instance size](images/quality_by_size.png)
-
-![Quality vs. runtime at 100 cities](images/quality_vs_time_100.png)
 
 ### TSPLIB instances (gap to the published optimum)
 
@@ -58,23 +60,39 @@ Four classic instances from [TSPLIB](http://comopt.ifi.uni-heidelberg.de/softwar
 | Nearest Neighbor | 511 (+20.0%) | 8980 (+19.1%) | 830 (+23.0%) | 27807 (+30.7%) |
 | Nearest Insertion | 495 (+16.2%) | 9043 (+19.9%) | 790 (+17.0%) | 25742 (+21.0%) |
 | 2-Opt | 446 (+4.7%) | 8108 (+7.5%) | 716 (+6.1%) | 22294 (+4.8%) |
-| 3-Opt | 442 (+3.8%) | 7991 (+6.0%) | 710 (+5.2%) | 21942 (+3.1%) |
-| 2-Opt + Or-Opt | 428 (+0.5%) | 7986 (+5.9%) | 712 (+5.5%) | 22013 (+3.4%) |
-| Iterated Local Search | 427 (+0.2%) | **7542** | 680 (+0.7%) | **21282** |
-| Simulated Annealing | 427 (+0.2%) | **7542** | 683 (+1.2%) | **21282** |
-| Genetic Algorithm | 427 (+0.2%) | **7542** | 681 (+0.9%) | **21282** |
+| 3-Opt | 436 (+2.3%) | 7986 (+5.9%) | 708 (+4.9%) | 21775 (+2.3%) |
+| 2-Opt + Or-Opt | 428 (+0.5%) | 7974 (+5.7%) | 708 (+4.9%) | 21915 (+3.0%) |
+| Iterated Local Search | **426** | **7542** | **675** | **21282** |
+| Simulated Annealing | 427 (+0.2%) | **7542** | 684 (+1.3%) | 21450 (+0.8%) |
+| Genetic Algorithm | **426** | **7542** | **675** | **21282** |
 
 ![Gap to optimum on TSPLIB instances](images/tsplib_gap.png)
 
+The last three algorithms are randomized, so one seed says little about them. Over 20 seeds (0–19), the number of runs that reach the optimum and the mean gap to it:
+
+| Algorithm | eil51 | berlin52 | st70 | kroA100 |
+|-----------|-----------|-----------|-----------|-----------|
+| Iterated Local Search | 17/20 (+0.04%) | 20/20 (+0.00%) | 20/20 (+0.00%) | 20/20 (+0.00%) |
+| Simulated Annealing | 1/20 (+0.62%) | 17/20 (+0.42%) | 5/20 (+0.88%) | 0/20 (+0.51%) |
+| Genetic Algorithm | 19/20 (+0.01%) | 20/20 (+0.00%) | 20/20 (+0.00%) | 20/20 (+0.00%) |
+
 ### Larger instances
 
-Tour length and runtime on random instances (same generator):
+Tour length and runtime on random instances (same generator, one run each). Bold is the best result for that size. 3-Opt is left out: its O(n³) passes take minutes here.
 
-| Algorithm | 200 cities | 500 cities | 1000 cities |
-|-----------|-----------|-----------|-----------|
-| 2-Opt | 1094.3 (0.01 s) | 1743.3 (0.02 s) | 2433.2 (0.12 s) |
-| 2-Opt + Or-Opt | 1078.2 (0.02 s) | 1709.7 (0.07 s) | 2358.3 (0.23 s) |
-| Iterated Local Search | 1056.8 (0.23 s) | 1655.8 (0.93 s) | 2324.8 (1.84 s) |
+| Algorithm | 200 cities | 500 cities | 1000 cities | 2000 cities |
+|-----------|-----------|-----------|-----------|-----------|
+| Nearest Neighbor | 1303.4 (1.0 ms) | 2002.4 (2.9 ms) | 2839.4 (6.1 ms) | 4026.2 (16 ms) |
+| Nearest Insertion | 1236.1 (6.0 ms) | 2052.5 (18 ms) | 2799.7 (41 ms) | 4073.4 (0.11 s) |
+| 2-Opt | 1094.3 (3.9 ms) | 1743.3 (14 ms) | 2433.2 (38 ms) | 3448.1 (99 ms) |
+| 2-Opt + Or-Opt | 1078.2 (14 ms) | 1710.4 (45 ms) | 2354.6 (0.14 s) | 3362.3 (0.36 s) |
+| Iterated Local Search | 1045.1 (0.50 s) | **1640.2** (0.81 s) | **2279.3** (1.9 s) | **3255.8** (3.9 s) |
+| Simulated Annealing | 1069.3 (0.13 s) | 1652.8 (0.37 s) | 2308.9 (0.85 s) | 3324.3 (1.7 s) |
+| Genetic Algorithm | **1038.4** (1.2 s) | 1642.7 (3.5 s) | 2284.2 (6.2 s) | 3286.9 (13 s) |
+
+![Quality vs. runtime at 1000 cities](images/quality_vs_time_1000.png)
+
+The solver keeps the whole distance matrix in memory, about 40 bytes per pair of cities: 40 MB for 1000 cities, 1 GB for 5000. That puts the practical limit at a few thousand cities.
 
 ## Installation
 
@@ -115,20 +133,27 @@ Installing the package adds a `tsp-solver` command (also available as `python -m
 tsp-solver solve data/tsplib/berlin52.tsp                 # TSPLIB file
 tsp-solver solve cities.csv -a 2-opt -a genetic_algorithm  # CSV: x,y[,name] per row
 tsp-solver solve --random 200 --seed 1 --plot tour.png --tour-out tour.txt
+tsp-solver solve --random 2000 --time-limit 10             # keep improving for 10 seconds
 tsp-solver demo                                            # the 20-city example below
 ```
 
-Repeat `-a` to compare algorithms. The default algorithm is `iterated_local_search`. Choices: `brute_force`, `held_karp`, `nearest_neighbor`, `nearest_insertion`, `2-opt`, `3-opt`, `2-opt+or-opt`, `iterated_local_search`, `simulated_annealing`, `genetic_algorithm`. CSV files may have a header row; the optional third column names the cities. `--seed` makes the randomized algorithms reproducible; `--random N` without `--seed` uses seed 42 for both the cities and the algorithms.
+Repeat `-a` to compare algorithms. The default algorithm is `iterated_local_search`. Choices: `brute_force`, `held_karp`, `nearest_neighbor`, `nearest_insertion`, `2-opt`, `3-opt`, `2-opt+or-opt`, `iterated_local_search`, `simulated_annealing`, `genetic_algorithm`.
+
+- **CSV files** may have a header row; the optional third column names the cities. Fields may be separated by commas, semicolons, tabs or spaces (with semicolons or tabs, decimal commas are read too). Files are read as UTF-8, or as Windows-1252 if they are not valid UTF-8.
+- **TSPLIB files**: for the standard instances the published optimum is known, and the gap to it is printed.
+- **`--seed`** makes the randomized algorithms reproducible; `--random N` without `--seed` uses seed 42 for both the cities and the algorithms.
+- **`--time-limit SECONDS`** lets `iterated_local_search` run for that long instead of its default number of kicks. The result then depends on the speed of the machine as well as on the seed.
+- **`--plot`** labels the cities only up to 50 of them; **`--tour-out`** writes UTF-8.
 
 ```
 $ tsp-solver solve data/tsplib/berlin52.tsp -a 2-opt -a genetic_algorithm --seed 42
 Instance: berlin52 (52 cities, EUC_2D), optimum 7542
 Algorithm                     Distance       Gap    Time (s)
-2-opt                          8108.00     7.50%      0.0014
-genetic_algorithm              7542.00     0.00%      0.2305
+2-opt                          8108.00     7.50%      0.0006
+genetic_algorithm              7542.00     0.00%      0.3059
 
 Best: genetic_algorithm, distance 7542.00
-Tour: 6 -> 4 -> 25 -> 12 -> 28 -> 27 -> 26 -> 47 -> ... -> 6
+Tour: 18 -> 31 -> 22 -> 1 -> 49 -> 32 -> 45 -> 19 -> ... -> 18
 ```
 
 ## Example Output
@@ -146,17 +171,17 @@ Algorithm              Distance        Time (s)
 ------------------------------------------------------------
 nearest_neighbor       465.04          0.0000
 nearest_insertion      462.66          0.0001
-2-opt                  386.63          0.0005
-3-opt                  386.63          0.0011
-2-opt+or-opt           386.63          0.0008
-iterated_local_search  386.43          0.0375
-simulated_annealing    386.43          0.1160
-genetic_algorithm      386.43          0.0832
-held_karp              386.43          1.6711
+2-opt                  386.63          0.0002
+3-opt                  386.63          0.0006
+2-opt+or-opt           386.63          0.0003
+iterated_local_search  386.43          0.0553
+simulated_annealing    386.43          0.0692
+genetic_algorithm      386.43          0.1376
+held_karp              386.43          0.7402
 ------------------------------------------------------------
 
-Best Solution: genetic_algorithm
-Tour: C1 -> C19 -> C6 -> C14 -> C10 -> ...
+Best Solution: iterated_local_search
+Tour: C0 -> C16 -> C5 -> C3 -> C13 -> ...
 Total Distance: 386.43
 
 ============================================================
@@ -185,7 +210,7 @@ All images and the results tables above come from one script:
 python scripts/generate_figures.py
 ```
 
-Distances are deterministic; times depend on the machine.
+It takes about two minutes. Distances are deterministic; times depend on the machine.
 
 ## Usage Examples
 
@@ -220,11 +245,13 @@ tour_exact, dist_exact = solver.held_karp()           # up to 20 cities
 from tsp_solver import TSPSolver, load_tsplib
 
 solver = TSPSolver.from_tsplib("data/tsplib/kroA100.tsp", seed=42)
-tour, distance = solver.genetic_algorithm()
+tour, distance = solver.iterated_local_search()
 print(distance, load_tsplib("data/tsplib/kroA100.tsp")["optimum"])   # 21282.0 21282
 ```
 
 `EUC_2D`, `CEIL_2D` and `ATT` distance types are supported. Pass `distance="EUC_2D"` (or another TSPLIB convention) to `TSPSolver` to use the rounded distances directly.
+
+`load_tsplib` returns the published optimum for 74 standard instances with these distance types (`TSPLIB_OPTIMA`, e.g. `a280`, `pr1002`, `d1291`), so your own copies of those files are compared with the optimum as well.
 
 ### Algorithm Comparison
 
@@ -245,6 +272,7 @@ for algo, data in results.items():
 - **Errors:** unknown algorithm names raise `ValueError`.
 - **Size limits:** exact algorithms are skipped above their limit (brute force 10 cities, Held-Karp 20).
 - **Seeding:** with a seed, every algorithm starts from the same random stream, so its result does not depend on which algorithms ran before it.
+- **Options:** pass keyword arguments for individual algorithms with `options`, e.g. `solver.compare_algorithms(['2-opt', 'iterated_local_search'], options={'iterated_local_search': {'time_limit': 5}})`.
 
 ### Benchmarks with pandas
 
@@ -261,9 +289,10 @@ print(df[["Instance", "Algorithm", "Distance", "Optimum", "Gap (%)"]])
 
 ```python
 solver.two_opt(neighbors=10)                    # only the 10 nearest cities as partners: faster on large instances
-solver.iterated_local_search(iterations=5000)   # more kicks, better tours
-solver.simulated_annealing(max_iterations=500000)
-solver.genetic_algorithm(population_size=50, generations=200)
+solver.iterated_local_search(iterations=20000)  # more kicks, better tours (default: max(1000, 2 x cities))
+solver.iterated_local_search(time_limit=30)     # or keep kicking for 30 seconds
+solver.simulated_annealing(max_iterations=2000000)        # default: max(100000, 500 x cities)
+solver.genetic_algorithm(population_size=50, generations=100)   # default: 30 tours, 40 generations
 solver.held_karp(max_cities=22)                 # memory grows as n * 2^n
 ```
 
@@ -272,6 +301,8 @@ solver.held_karp(max_cities=22)                 # memory grows as n * 2^n
 ```python
 solver.visualize_tour(tour, "Tour", save_path="tour.png", show=False)
 ```
+
+City names are drawn for up to 50 cities; pass `labels=True` or `labels=False` to decide yourself.
 
 ## Project Structure
 
@@ -310,17 +341,18 @@ pytest
 - Real-time applications
 
 **Iterated Local Search**
-- Default choice when a fraction of a second is acceptable
-- Optimal on 2 of the 4 TSPLIB instances above, within 0.7% on the other two
+- Default choice: a fraction of a second up to a few hundred cities, seconds for thousands
+- Optimal on all four TSPLIB instances above, in 77 of 80 runs over 20 seeds
+- Give it more kicks or a time limit when the tour matters more than the wait
 
 **Genetic Algorithm**
-- Best result, or within 1% of it, on every benchmark above, at about 3× the time of ILS
+- As good as Iterated Local Search up to about 1000 cities (optimal in 79 of the 80 TSPLIB runs), at 2–5× the runtime
 
 **Simulated Annealing**
-- Escapes local optima; matched or beat 2-Opt on every instance tested, close behind ILS and the GA
+- The simplest of the three: usually 0.5–1% above the optimum on the TSPLIB instances and 1–2% behind Iterated Local Search on large ones, in less time
 
 **3-Opt**
-- Included for comparison; 2-Opt + Or-Opt gives similar quality much faster
+- Included for comparison: it returns a true 3-opt local optimum, but 2-Opt + Or-Opt gives similar quality much faster (O(n³) per pass limits 3-Opt to about 150 cities)
 
 
 ## Real-World Applications
@@ -337,8 +369,8 @@ This TSP solver can be applied to various optimization problems:
 ## Performance Tips
 
 1. **For instant results with good quality**: Use 2-Opt (it starts from Nearest Neighbor)
-2. **For the best quality per second**: Use Iterated Local Search; raise `iterations` for more
-3. **For large instances (1000+ cities)**: Use `two_opt(neighbors=10)` or `local_search()`
+2. **For the best quality per second**: Use Iterated Local Search; raise `iterations` or set `time_limit` for more
+3. **For large instances (1000+ cities)**: Iterated Local Search still works (about 2 s for 1000 cities, 4 s for 2000); for milliseconds, use `two_opt(neighbors=10)` or `local_search()`
 4. **For reproducible results**: Pass `seed=` to `TSPSolver`
 5. **For guaranteed optimal (≤20 cities)**: Use Held-Karp
 
@@ -346,9 +378,11 @@ This TSP solver can be applied to various optimization problems:
 
 Suggested next improvements (contributions welcome):
 
-- **Larger TSPLIB benchmarks**: bundle instances with 1,000+ cities (e.g. `pr1002`, `d1291`) and add a quality-vs-runtime chart at that scale.
-- **Lin–Kernighan-style moves**: variable-depth k-opt moves (as in LKH) are the next step in tour quality beyond 2-Opt + Or-Opt.
-- **Faster metaheuristics**: simulated annealing and the genetic algorithm run as pure-Python loops; compiling the inner loops with Numba or Cython could make them roughly 10–50× faster.
+- **Lin–Kernighan-style moves**: variable-depth k-opt moves (as in LKH) are the next step in tour quality beyond 2-Opt + Or-Opt, and would make each kick of Iterated Local Search count for more.
+- **Larger TSPLIB benchmarks**: bundle instances with 1,000+ cities (e.g. `pr1002`, `d1291`; their optima are already in `TSPLIB_OPTIMA`) next to the random instances above.
+- **Distances that are not Euclidean**: accept a distance matrix (road distances, travel times) and TSPLIB's `EXPLICIT` and `GEO` instances.
+- **Beyond a few thousand cities**: build the neighbor lists from a spatial index and compute distances on demand instead of storing the full matrix.
+- **Compiled inner loops**: the local search, simulated annealing and the genetic algorithm are pure-Python loops; Numba or Cython could make them roughly 10–50× faster.
 - **PyPI release**: the package already installs with `pip install -e .`; publishing it (under a name still free on PyPI) would allow `pip install` without cloning the repository.
 
 ## References
@@ -358,6 +392,8 @@ Suggested next improvements (contributions welcome):
 3. Johnson, D. S., & McGeoch, L. A. (1997). "The traveling salesman problem: A case study in local optimization"
 4. Held, M., & Karp, R. M. (1962). "A dynamic programming approach to sequencing problems"
 5. Reinelt, G. (1991). "TSPLIB — A Traveling Salesman Problem Library"
+6. Martin, O., Otto, S. W., & Felten, E. W. (1991). "Large-step Markov chains for the traveling salesman problem"
+7. Bentley, J. J. (1992). "Fast algorithms for geometric traveling salesman problems"
 
 ## License
 
